@@ -30,7 +30,7 @@
     "vitest": "^4.1.7"
   },
   "title": "Gittensory",
-  "description": "Fast Raycast commands for Gittensory session auth and status.",
+  "description": "Raycast miner command center for Gittensory — plan work, analyze branches, open PRs, and copy public-safe packets.",
   "icon": "assets/extension-icon.png",
   "author": "jsonbored",
   "categories": ["Developer Tools"],
@@ -53,6 +53,36 @@
       "title": "Logout",
       "description": "Revoke the local Gittensory session",
       "mode": "no-view"
+    },
+    {
+      "name": "plan-next-work",
+      "title": "Plan Next Work",
+      "description": "Rank next contributor-safe work from your decision pack",
+      "mode": "view"
+    },
+    {
+      "name": "analyze-branch",
+      "title": "Analyze Branch",
+      "description": "Metadata-only branch analysis for the configured repo path",
+      "mode": "view"
+    },
+    {
+      "name": "open-prs",
+      "title": "Open PRs",
+      "description": "Show open PR monitor and next-step guidance",
+      "mode": "view"
+    },
+    {
+      "name": "copy-pr-packet",
+      "title": "Copy PR Packet",
+      "description": "Copy a public-safe PR packet markdown to the clipboard",
+      "mode": "no-view"
+    },
+    {
+      "name": "explain-blockers",
+      "title": "Explain Blockers",
+      "description": "Explain scoreability blockers for login or current branch",
+      "mode": "view"
     }
   ],
   "preferences": [
@@ -63,6 +93,28 @@
       "title": "API Origin",
       "description": "Gittensory API base URL",
       "default": "https://gittensory-api.aethereal.dev"
+    },
+    {
+      "name": "repoPath",
+      "type": "textfield",
+      "required": false,
+      "title": "Repo Path",
+      "description": "Local git repository path for branch analysis and PR packet commands"
+    },
+    {
+      "name": "repoFullName",
+      "type": "textfield",
+      "required": false,
+      "title": "Repo (owner/name)",
+      "description": "Optional override when git remote cannot be inferred"
+    },
+    {
+      "name": "baseRef",
+      "type": "textfield",
+      "required": false,
+      "title": "Base Ref",
+      "description": "Git base ref for local diff metadata (default: upstream or origin/main)",
+      "default": "origin/main"
     }
   ]
 }

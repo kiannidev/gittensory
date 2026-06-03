@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { gittensoryApiRequest } from "../lib/api";
+import { formatMinerApiError, GittensoryApiError } from "../lib/errors";
 import { jsonResponse, mockFetch } from "./helpers";
 
 describe("gittensoryApiRequest", () => {
@@ -25,7 +26,20 @@ describe("gittensoryApiRequest", () => {
         path: "/v1/fail",
         fetchImpl,
       }),
-    ).rejects.toThrow("request_failed_502");
+    ).rejects.toBeInstanceOf(GittensoryApiError);
+  });
+
+  it("formats rate-limit errors with retry-after", async () => {
+    const fetchImpl = async () =>
+      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "12" } });
+    await expect(gittensoryApiRequest({ apiOrigin: "http://localhost:8787", path: "/v1/ping", fetchImpl })).rejects.toBeInstanceOf(
+      GittensoryApiError,
+    );
+    try {
+      await gittensoryApiRequest({ apiOrigin: "http://localhost:8787", path: "/v1/ping", fetchImpl });
+    } catch (error) {
+      expect(formatMinerApiError(error)).toMatch(/Retry in 12 second/i);
+    }
   });
 
   it("surfaces API error messages", async () => {

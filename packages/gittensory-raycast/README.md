@@ -32,6 +32,18 @@ Load the extension in Raycast with **Import Extension** pointed at this director
 
 ## Commands
 
+### Auth
+
 - **Login** — starts device flow, opens the verification URL, polls until a `gts_` session is issued, persists locally
 - **Status** — shows signed-in login, API origin, expiry, and scopes (sanitized)
 - **Logout** — revokes the remote session when possible and clears local storage
+
+### Miner command center
+
+- **Plan Next Work** — `POST /v1/agent/plan-next-work`
+- **Analyze Branch** — local git metadata only → `POST /v1/local/branch-analysis` (requires **Repo Path**)
+- **Open PRs** — `GET /v1/contributors/:login/open-pr-monitor`
+- **Copy PR Packet** — metadata-only → `POST /v1/agent/prepare-pr-packet`, copies public-safe markdown
+- **Explain Blockers** — `POST /v1/agent/explain-blockers` (login-only or branch metadata when **Repo Path** is set)
+
+Rate limits (HTTP 429) show retry guidance from `Retry-After` when present.

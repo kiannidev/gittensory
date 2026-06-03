@@ -22,6 +22,15 @@ describe("raycast package boundaries", () => {
 
   it("package manifest exposes only auth commands", () => {
     const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { commands: Array<{ name: string }> };
-    expect(manifest.commands.map((command) => command.name).sort()).toEqual(["login", "logout", "status"]);
+    expect(manifest.commands.map((command) => command.name).sort()).toEqual([
+      "analyze-branch",
+      "copy-pr-packet",
+      "explain-blockers",
+      "login",
+      "logout",
+      "open-prs",
+      "plan-next-work",
+      "status",
+    ]);
   });
 });
