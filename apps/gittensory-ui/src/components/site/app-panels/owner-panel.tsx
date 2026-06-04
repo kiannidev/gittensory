@@ -14,6 +14,7 @@ import {
   splitRepoFullName,
   type GittensorConfigRecommendationPayload,
   type RegistrationReadinessPayload,
+  type OwnerWorkflowState,
   type RegistrationWorkspaceView,
   type WorkspaceLaneStatus,
 } from "@/lib/registration-workspace";
@@ -30,6 +31,18 @@ const FRESHNESS_STATUS_MAP: Record<RegistrationWorkspaceView["freshness"]["statu
   degraded: "degraded",
   stale: "stale",
   unknown: "info",
+};
+
+const WORKFLOW_STATE_MAP: Record<OwnerWorkflowState, Status> = {
+  accepted: "ready",
+  needs_cleanup: "warn",
+  not_ready: "blocked",
+};
+
+const WORKFLOW_STATE_LABEL: Record<OwnerWorkflowState, string> = {
+  accepted: "Accepted",
+  needs_cleanup: "Needs cleanup",
+  not_ready: "Not ready",
 };
 
 export function OwnerPanel() {
@@ -71,7 +84,7 @@ export function OwnerPanel() {
           <div>
             <h2 className="font-display text-token-lg font-semibold">Registration workspace</h2>
             <p className="mt-1 text-token-xs text-muted-foreground">
-              Readiness report with lane tradeoffs — not raw Gittensor telemetry.
+              Guided owner workflow with remediation steps — not raw Gittensor telemetry.
             </p>
           </div>
           <div className="w-full sm:w-64">
@@ -154,6 +167,33 @@ function RegistrationWorkspace({
         </dl>
       </section>
 
+      <section className="rounded-token border-hairline bg-card p-5 space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="font-display text-token-md font-semibold">Guided workflow</h3>
+          <StatusPill status={WORKFLOW_STATE_MAP[workspace.workflow.overallState]}>
+            {WORKFLOW_STATE_LABEL[workspace.workflow.overallState]}
+          </StatusPill>
+        </div>
+        <p className="text-token-xs text-muted-foreground">{workspace.workflow.overallHeadline}</p>
+        {workspace.workflow.nextSteps.length > 0 ? (
+          <div>
+            <h4 className="text-token-2xs font-medium uppercase tracking-wider text-muted-foreground">
+              Next steps
+            </h4>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 text-token-xs text-muted-foreground">
+              {workspace.workflow.nextSteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
+        <div className="grid gap-4 lg:grid-cols-2">
+          {workspace.workflow.buckets.map((bucket) => (
+            <WorkflowBucketCard key={bucket.id} bucket={bucket} />
+          ))}
+        </div>
+      </section>
+
       <section className="grid gap-4 lg:grid-cols-2">
         <WorkspaceSectionCard section={workspace.lanes.directPr} />
         <WorkspaceSectionCard section={workspace.lanes.issueDiscovery} />
@@ -211,6 +251,41 @@ function RegistrationWorkspace({
         </section>
       ) : null}
     </div>
+  );
+}
+
+function WorkflowBucketCard({
+  bucket,
+}: {
+  bucket: RegistrationWorkspaceView["workflow"]["buckets"][number];
+}) {
+  return (
+    <article className="rounded-token border-hairline bg-muted/10 p-4">
+      <div className="flex items-start justify-between gap-2">
+        <h4 className="font-medium">{bucket.title}</h4>
+        <StatusPill status={WORKFLOW_STATE_MAP[bucket.state]}>{WORKFLOW_STATE_LABEL[bucket.state]}</StatusPill>
+      </div>
+      <p className="mt-1 text-token-2xs text-muted-foreground">{bucket.summary}</p>
+      {bucket.items.length === 0 ? (
+        <p className="mt-2 text-token-2xs text-muted-foreground">No open items in this bucket.</p>
+      ) : (
+        <ul className="mt-3 space-y-3">
+          {bucket.items.map((item) => (
+            <li key={item.id} className="rounded-token border-hairline bg-card px-3 py-2 text-token-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{item.title}</span>
+                <StatusPill status={WORKFLOW_STATE_MAP[item.state]}>{WORKFLOW_STATE_LABEL[item.state]}</StatusPill>
+                <span className="font-mono text-token-2xs uppercase tracking-wider text-muted-foreground">
+                  {item.remediationKind === "manual" ? "Manual" : "Action"}
+                </span>
+              </div>
+              <p className="mt-1 text-muted-foreground">{item.summary}</p>
+              <p className="mt-1 text-foreground">{item.remediation}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </article>
   );
 }
 
