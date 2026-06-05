@@ -36,6 +36,7 @@ import {
   recentMergedPullRequests,
   repositories,
   repoGithubTotalsSnapshots,
+  repoQueueTrendSnapshots,
   registryDriftEvents,
   repoLabels,
   repoSnapshots,
@@ -117,6 +118,7 @@ import type {
   RegistryDriftEventRecord,
   RepoLabelRecord,
   RepoGithubTotalsSnapshotRecord,
+  RepoQueueTrendSnapshotRecord,
   RepoSnapshotRecord,
   RepoSyncSegmentRecord,
   RepoSyncStateRecord,
@@ -633,6 +635,24 @@ export async function getLatestRepoGithubTotalsSnapshot(env: Env, fullName: stri
   return row ? toRepoGithubTotalsSnapshotRecord(row) : null;
 }
 
+export async function listRepoGithubTotalsSnapshotHistory(
+  env: Env,
+  fullName: string,
+  options: { sinceIso?: string | undefined; limit?: number | undefined } = {},
+): Promise<RepoGithubTotalsSnapshotRecord[]> {
+  const db = getDb(env.DB);
+  const limit = Math.max(2, Math.min(options.limit ?? 120, 240));
+  const conditions = [eq(repoGithubTotalsSnapshots.repoFullName, fullName)];
+  if (options.sinceIso) conditions.push(gte(repoGithubTotalsSnapshots.fetchedAt, options.sinceIso));
+  const rows = await db
+    .select()
+    .from(repoGithubTotalsSnapshots)
+    .where(and(...conditions))
+    .orderBy(desc(repoGithubTotalsSnapshots.fetchedAt))
+    .limit(limit);
+  return rows.map(toRepoGithubTotalsSnapshotRecord).reverse();
+}
+
 export async function listLatestRepoGithubTotalsSnapshots(env: Env): Promise<RepoGithubTotalsSnapshotRecord[]> {
   const db = getDb(env.DB);
   const latestRows = await db
@@ -652,6 +672,23 @@ export async function listLatestRepoGithubTotalsSnapshots(env: Env): Promise<Rep
     if (row) rows.push(row);
   }
   return rows.map(toRepoGithubTotalsSnapshotRecord).sort((left, right) => left.repoFullName.localeCompare(right.repoFullName));
+}
+
+export async function upsertRepoQueueTrendSnapshot(env: Env, snapshot: RepoQueueTrendSnapshotRecord): Promise<void> {
+  const db = getDb(env.DB);
+  await db
+    .insert(repoQueueTrendSnapshots)
+    .values({ repoFullName: snapshot.repoFullName, payloadJson: jsonString(snapshot.payload), generatedAt: snapshot.generatedAt })
+    .onConflictDoUpdate({
+      target: repoQueueTrendSnapshots.repoFullName,
+      set: { payloadJson: jsonString(snapshot.payload), generatedAt: snapshot.generatedAt },
+    });
+}
+
+export async function getRepoQueueTrendSnapshot(env: Env, repoFullName: string): Promise<RepoQueueTrendSnapshotRecord | null> {
+  const db = getDb(env.DB);
+  const [row] = await db.select().from(repoQueueTrendSnapshots).where(eq(repoQueueTrendSnapshots.repoFullName, repoFullName)).limit(1);
+  return row ? toRepoQueueTrendSnapshotRecord(row) : null;
 }
 
 export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequestDetailSyncStateRecord): Promise<void> {
@@ -2855,6 +2892,14 @@ function toRepoGithubTotalsSnapshotRecord(row: typeof repoGithubTotalsSnapshots.
   };
 }
 
+function toRepoQueueTrendSnapshotRecord(row: typeof repoQueueTrendSnapshots.$inferSelect): RepoQueueTrendSnapshotRecord {
+  return {
+    repoFullName: row.repoFullName,
+    payload: parseJson<Record<string, JsonValue>>(row.payloadJson, {}),
+    generatedAt: row.generatedAt,
+  };
+}
+
 function toPullRequestDetailSyncStateRecord(row: typeof pullRequestDetailSyncState.$inferSelect): PullRequestDetailSyncStateRecord {
   return {
     repoFullName: row.repoFullName,
@@ -3606,6 +3651,13 @@ async function upsertProductUsageDailyRollup(env: Env, day: string, generatedAt:
   return record;
 }
 
+// Bounded enum dimensions (surface / outcome / eventName) are consumed by exact-name lookups
+// (e.g. the weekly value report's sumEvent over byEvent), so they must be stored complete:
+// frequency-truncating a bounded exact-lookup dimension silently zeroes any value below the
+// top-N cut on a high-diversity day. Only the genuinely-unbounded repo/command/tool/route
+// dimensions keep a display top-N.
+const FULL_DIMENSION_LIMIT = Number.MAX_SAFE_INTEGER;
+
 function buildProductUsageDailyRollupRecord(args: {
   day: string;
   generatedAt: string;
@@ -3633,9 +3685,9 @@ function buildProductUsageDailyRollupRecord(args: {
     maxEventCapacity: PRODUCT_USAGE_ROLLUP_EVENT_SCAN_LIMIT,
     firstEventAt: args.events[0]?.occurredAt ?? null,
     lastEventAt: args.events.at(-1)?.occurredAt ?? null,
-    bySurface: countProductUsageDimensions(args.events.map((event) => event.surface)).map(({ key, count }) => ({ surface: normalizeProductUsageSurface(key), count })),
-    byOutcome: countProductUsageDimensions(args.events.map((event) => event.outcome)).map(({ key, count }) => ({ outcome: normalizeProductUsageOutcome(key), count })),
-    byEvent: countProductUsageDimensions(args.events.map((event) => event.eventName)).map(({ key, count }) => ({ eventName: key, count })),
+    bySurface: countProductUsageDimensions(args.events.map((event) => event.surface), FULL_DIMENSION_LIMIT).map(({ key, count }) => ({ surface: normalizeProductUsageSurface(key), count })),
+    byOutcome: countProductUsageDimensions(args.events.map((event) => event.outcome), FULL_DIMENSION_LIMIT).map(({ key, count }) => ({ outcome: normalizeProductUsageOutcome(key), count })),
+    byEvent: countProductUsageDimensions(args.events.map((event) => event.eventName), FULL_DIMENSION_LIMIT).map(({ key, count }) => ({ eventName: key, count })),
     byRepo: countProductUsageDimensions(args.events.map((event) => event.repoFullName)),
     byCommand: countProductUsageDimensions(args.events.map((event) => productUsageMetadataString(event, "command"))),
     byTool: countProductUsageDimensions(args.events.map((event) => productUsageMetadataString(event, "toolName"))),
