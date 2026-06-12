@@ -3,6 +3,7 @@ import { evaluateGateCheck, formatGateCheckOutput } from "../../src/rules/adviso
 import {
   evaluateMergeReadinessGateCheck,
   collectMergeReadinessUnmetConditions,
+  isMergeReadinessCompositeEnabled,
   slopFindingsToAdvisoryFindings,
 } from "../../src/rules/merge-readiness-gate";
 import { buildPullRequestAdvisory } from "../../src/rules/advisory";
@@ -33,6 +34,26 @@ describe("merge-readiness aggregate gate", () => {
       buildSlopAssessment({ changedFiles: [{ path: "src/app.ts", additions: 4 }] }),
     );
     expect(finding).toMatchObject({ code: "missing_test_evidence", title: "Code changes lack test evidence" });
+    expect(
+      slopFindingsToAdvisoryFindings({
+        slopRisk: 10,
+        band: "low",
+        findings: [
+          { code: "detail_only", title: "Detail only", severity: "warning", detail: "detail" },
+          { code: "action_only", title: "Action only", severity: "warning", detail: "detail", action: "Fix it." },
+        ],
+      }),
+    ).toEqual([
+      { code: "detail_only", title: "Detail only", severity: "warning", detail: "detail" },
+      { code: "action_only", title: "Action only", severity: "warning", detail: "detail", action: "Fix it." },
+    ]);
+  });
+
+  it("detects when composite merge-readiness mode is enabled", () => {
+    expect(isMergeReadinessCompositeEnabled({ mergeReadinessGateMode: "off" })).toBe(false);
+    expect(isMergeReadinessCompositeEnabled({ mergeReadinessGateMode: "advisory" })).toBe(true);
+    expect(isMergeReadinessCompositeEnabled({ mergeReadinessGateMode: "block" })).toBe(true);
+    expect(isMergeReadinessCompositeEnabled({})).toBe(false);
   });
 
   it("keeps legacy per-gate behavior when composite mode is off", () => {
@@ -116,6 +137,33 @@ describe("merge-readiness aggregate gate", () => {
     expect(gate.blockers).toEqual([]);
     expect(gate.warnings.map((finding) => finding.code)).toContain("missing_linked_issue");
     expect(gate.summary).toContain("remain advisory");
+  });
+
+  it("uses plural advisory summaries when multiple composite conditions remain", () => {
+    const pr: PullRequestRecord = {
+      repoFullName: repo.fullName,
+      number: 19,
+      title: "Add panel",
+      state: "open",
+      authorLogin: "contributor",
+      authorAssociation: "NONE",
+      headSha: "abc123",
+      labels: [],
+      linkedIssues: [],
+    };
+    const advisory = buildPullRequestAdvisory(repo, pr, { requireLinkedIssue: true });
+
+    const gate = evaluateMergeReadinessGateCheck(advisory, {
+      mergeReadinessGateMode: "advisory",
+      linkedIssueGateMode: "block",
+      duplicatePrGateMode: "off",
+      qualityGateMode: "block",
+      qualityGateMinScore: 90,
+      readinessScore: 40,
+    });
+
+    expect(gate.conclusion).toBe("success");
+    expect(gate.summary).toBe("2 merge-readiness conditions remain advisory.");
   });
 
   it("passes composite gate when all enabled sub-gates are satisfied", () => {
@@ -237,5 +285,31 @@ describe("merge-readiness aggregate gate", () => {
 
     expect(qualityGate.conclusion).toBe("failure");
     expect(qualityGate.summary).toBe("1 merge-readiness condition still blocking: Readiness score is below the configured threshold.");
+  });
+
+  it("ignores enabled duplicate sub-gates when no duplicate finding exists and keeps passing quality scores out of unmet", () => {
+    const pr: PullRequestRecord = {
+      repoFullName: repo.fullName,
+      number: 20,
+      title: "Clean panel",
+      state: "open",
+      authorLogin: "contributor",
+      authorAssociation: "NONE",
+      headSha: "abc123",
+      labels: [],
+      linkedIssues: [42],
+    };
+    const advisory = buildPullRequestAdvisory(repo, pr, { requireLinkedIssue: true });
+
+    expect(
+      collectMergeReadinessUnmetConditions(advisory, {
+        mergeReadinessGateMode: "block",
+        linkedIssueGateMode: "off",
+        duplicatePrGateMode: "block",
+        qualityGateMode: "block",
+        qualityGateMinScore: 80,
+        readinessScore: 95,
+      }),
+    ).toEqual([]);
   });
 });
