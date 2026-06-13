@@ -109,4 +109,33 @@ describe("buildRemediationPlan", () => {
     expect(plan.items.find((item) => item.source === "score")?.step).toBe("Resolve scoreability blockers before relying on this preview.");
     expect(JSON.stringify(plan)).not.toMatch(/\bwallet\b|\bhotkey\b|\bpayout\b/i);
   });
+
+  it("covers fallback rerun and step branches for sanitized-only input", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: ["Repository allocation is inactive"],
+      branchQualityBlockers: ["wallet hotkey payout"],
+      scoreBlockers: [""],
+      recommendedRerunCondition: "scoreability multiplier eligibility score preview",
+    });
+
+    expect(plan.items.find((item) => item.source === "account_state")?.step).toBe("Repository allocation is inactive");
+    expect(plan.items.find((item) => item.source === "branch_quality")?.step).toBe("Resolve branch-quality findings before submission.");
+    expect(plan.recommendedRerunCondition).toMatch(/linked issue and base branch metadata/i);
+    expect(plan.summary).toMatch(/2 remediation step/i);
+  });
+
+  it("falls back when recommended rerun text is fully redacted", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: [],
+      branchQualityBlockers: ["Needs cleanup"],
+      scoreBlockers: [],
+      recommendedRerunCondition: "wallet hotkey payout reward farming",
+    });
+
+    expect(plan.recommendedRerunCondition).toMatch(/branch, base, or PR state changes/i);
+  });
 });
