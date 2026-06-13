@@ -102,7 +102,7 @@ describe("buildRemediationPlan", () => {
     });
 
     expect(plan.items.find((item) => item.source === "account_state" && /Open PR/i.test(item.step))?.rerunCondition).toMatch(/pending PRs merge\/close/i);
-    expect(plan.items.find((item) => /credibility history/i.test(item.step))?.rerunCondition).toMatch(/account\/queue maturity blockers clear/i);
+    expect(plan.items.find((item) => /maturing/i.test(item.step))?.rerunCondition).toMatch(/account\/queue maturity blockers clear/i);
     expect(plan.items.find((item) => /stale/i.test(item.step))?.rerunCondition).toMatch(/git fetch origin/i);
     expect(plan.items.find((item) => /duplicate-prone/i.test(item.step))?.rerunCondition).toMatch(/linked issue and base branch metadata/i);
     expect(plan.items.find((item) => /GitHub checks/i.test(item.step))?.rerunCondition).toMatch(/validation evidence/i);

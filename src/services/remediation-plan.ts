@@ -45,7 +45,8 @@ const SOURCE_PRIORITY: Record<RemediationPlanSource, number> = {
 
 function publicSafeText(value: string): string {
   const sanitized = sanitizePublicComment(value).trim();
-  return sanitized && !FORBIDDEN_PATTERN.test(sanitized) ? sanitized : "";
+  if (!sanitized || FORBIDDEN_PATTERN.test(sanitized) || /^(?:private context\s*)+$/i.test(sanitized)) return "";
+  return sanitized;
 }
 
 function publicSafeRerunCondition(condition: string): string {
