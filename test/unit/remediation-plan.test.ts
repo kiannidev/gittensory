@@ -187,4 +187,64 @@ describe("buildRemediationPlan", () => {
       }),
     ]);
   });
+
+  it("returns an empty plan when every blocker is fully redacted", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: ["wallet hotkey payout"],
+      branchQualityBlockers: ["reward farming score preview"],
+      scoreBlockers: ["ranking raw trust score"],
+      recommendedRerunCondition: "wallet hotkey payout reward farming",
+    });
+
+    expect(plan.items).toEqual([]);
+    expect(plan.summary).toMatch(/No blockers detected/i);
+    expect(plan.recommendedRerunCondition).toMatch(/branch, base, or PR state changes/i);
+  });
+
+  it("uses score-source rerun conditions and medium impact for generic score blockers", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: [],
+      branchQualityBlockers: [],
+      scoreBlockers: ["Branch preview confidence is low"],
+      recommendedRerunCondition: "Rerun after local validation passes.",
+    });
+
+    expect(plan.items).toEqual([
+      expect.objectContaining({
+        source: "score",
+        impact: "medium",
+        rerunCondition: "Rerun after local validation passes.",
+      }),
+    ]);
+  });
+
+  it("strips local filesystem paths from public remediation steps", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: [],
+      branchQualityBlockers: ["/Users/miner/project/src/demo.ts"],
+      scoreBlockers: [],
+      recommendedRerunCondition: "Rerun after any branch, base, or PR state changes before opening/submitting.",
+    });
+
+    expect(plan.items[0]?.step).toBe("Resolve branch-quality findings before submission.");
+  });
+
+  it("skips blank blocker entries during deduplication", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: ["   "],
+      branchQualityBlockers: [],
+      scoreBlockers: [],
+      recommendedRerunCondition: "Rerun after any branch, base, or PR state changes before opening/submitting.",
+    });
+
+    expect(plan.items).toEqual([]);
+  });
 });
