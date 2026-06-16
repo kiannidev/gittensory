@@ -250,4 +250,30 @@ describe("buildRemediationPlan", () => {
 
     expect(plan.items).toEqual([]);
   });
+
+  it("uses the recommended rerun condition for generic account-state blockers", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: ["Repository allocation is inactive"],
+      branchQualityBlockers: [],
+      scoreBlockers: [],
+      recommendedRerunCondition: "Rerun after registration completes.",
+    });
+
+    expect(plan.items[0]?.rerunCondition).toBe("Rerun after registration completes.");
+  });
+
+  it("uses the recommended rerun condition for generic branch-quality blockers", () => {
+    const plan = buildRemediationPlan({
+      login: "miner",
+      repoFullName: "octo/demo",
+      accountStateBlockers: [],
+      branchQualityBlockers: ["Needs cleanup"],
+      scoreBlockers: [],
+      recommendedRerunCondition: "Rerun after docs are updated.",
+    });
+
+    expect(plan.items[0]?.rerunCondition).toBe("Rerun after docs are updated.");
+  });
 });

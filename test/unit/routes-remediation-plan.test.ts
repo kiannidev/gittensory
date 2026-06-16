@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../../src/api/routes";
 import { createSessionForGitHubUser } from "../../src/auth/security";
 import { upsertInstallation, upsertRepositoryFromGitHub } from "../../src/db/repositories";
+import { upsertRepoFocusManifest } from "../../src/signals/focus-manifest-loader";
 import { createTestEnv } from "../helpers/d1";
 
 const PATH = "/v1/local/remediation-plan";
@@ -90,6 +91,28 @@ describe("remediation-plan route", () => {
       login: "oktofeesh1",
       repoFullName: "miner/demo",
       items: expect.any(Array),
+    });
+  });
+
+  it("falls back to the persisted repo manifest when the caller omits focusManifest", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+    await seedRepo(env, "miner", "demo", 301);
+    await upsertRepoFocusManifest(env, "miner/demo", { wantedPaths: ["src/"], blockedPaths: ["dist/"] });
+    const response = await app.request(
+      PATH,
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify(branchPayload("oktofeesh1", "miner/demo")),
+      },
+      env,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      login: "oktofeesh1",
+      repoFullName: "miner/demo",
+      summary: expect.any(String),
     });
   });
 });
