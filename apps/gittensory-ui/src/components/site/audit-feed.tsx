@@ -5,6 +5,8 @@ import {
   buildSkippedPrAuditPath,
   formatAuditTimestamp,
   formatSkipReason,
+  normalizeSinceInput,
+  normalizeSkippedPrAuditExport,
   pullRequestHref,
   SKIP_REASON_OPTIONS,
   skipReasonTone,
@@ -70,7 +72,14 @@ export function AuditFeed({ enabled = true }: AuditFeedProps) {
       headers: { Accept: "application/json" },
     });
     if (result.ok) {
-      setData(result.data);
+      const normalized = normalizeSkippedPrAuditExport(result.data);
+      if (!normalized) {
+        setData(null);
+        setError("The skipped PR audit endpoint returned an unexpected response.");
+        setStatus("error");
+        return;
+      }
+      setData(normalized);
       setStatus("ready");
       return;
     }
@@ -84,8 +93,7 @@ export function AuditFeed({ enabled = true }: AuditFeedProps) {
   }, [load]);
 
   const applyFilters = () => {
-    const nextSince = sinceInput.trim() ? new Date(sinceInput).toISOString() : "";
-    setSinceIso(Number.isFinite(Date.parse(nextSince)) ? nextSince : "");
+    setSinceIso(normalizeSinceInput(sinceInput));
     setRepoFullName(repoDraft.trim());
     setLimit(DEFAULT_LIMIT);
   };

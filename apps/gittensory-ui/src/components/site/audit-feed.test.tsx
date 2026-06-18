@@ -8,6 +8,8 @@ vi.mock("@/lib/api/origin", () => ({ getApiOrigin: () => "https://api.test" }));
 import {
   buildSkippedPrAuditPath,
   formatSkipReason,
+  normalizeSinceInput,
+  normalizeSkippedPrAuditExport,
   pullRequestHref,
 } from "@/components/site/audit-feed-model";
 import { AuditFeed } from "@/components/site/audit-feed";
@@ -62,6 +64,37 @@ describe("audit feed helpers", () => {
       "https://github.com/repo-owner/owned-repo/pull/6",
     );
   });
+
+  it("normalizes since input without throwing on invalid dates", () => {
+    expect(normalizeSinceInput("")).toBe("");
+    expect(normalizeSinceInput("   ")).toBe("");
+    expect(normalizeSinceInput("not-a-date")).toBe("");
+    expect(normalizeSinceInput("2026-05-28T00:00:00.000Z")).toBe("2026-05-28T00:00:00.000Z");
+    expect(() => normalizeSinceInput("definitely-not-a-date")).not.toThrow();
+  });
+
+  it("normalizes skipped-pr audit exports and rejects malformed payloads", () => {
+    expect(normalizeSkippedPrAuditExport(SAMPLE)).toEqual(SAMPLE);
+    expect(normalizeSkippedPrAuditExport({ ...SAMPLE, items: [] })).toMatchObject({ items: [] });
+    expect(normalizeSkippedPrAuditExport(null)).toBeNull();
+    expect(normalizeSkippedPrAuditExport({ generatedAt: "2026-05-28T00:00:05.000Z" })).toBeNull();
+    expect(
+      normalizeSkippedPrAuditExport({
+        ...SAMPLE,
+        items: [
+          {
+            repoFullName: "x/y",
+            pullNumber: 1,
+            reason: "bot_author",
+            timestamp: "t",
+            remediation: "r",
+          },
+          null,
+          "bad",
+        ],
+      }),
+    ).toMatchObject({ items: [{ repoFullName: "x/y", pullNumber: 1 }] });
+  });
 });
 
 describe("AuditFeed", () => {
@@ -113,5 +146,66 @@ describe("AuditFeed", () => {
         expect.any(Object),
       ),
     );
+  });
+
+  it("ignores invalid since values when applying filters", async () => {
+    render(<AuditFeed />);
+    await screen.findByText("repo-owner/owned-repo");
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue({ ok: true, data: SAMPLE });
+
+    fireEvent.change(screen.getByLabelText(/^since$/i), {
+      target: { value: "definitely-not-a-date" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("owner/repo"), {
+      target: { value: "repo-owner/owned-repo" },
+    });
+    expect(() =>
+      fireEvent.click(screen.getByRole("button", { name: /apply filters/i })),
+    ).not.toThrow();
+
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining("repoFullName=repo-owner%2Fowned-repo"),
+        expect.any(Object),
+      ),
+    );
+    expect(apiFetch.mock.calls.some(([url]) => String(url).includes("since="))).toBe(false);
+  });
+
+  it("shows a role error when the feed is disabled", async () => {
+    render(<AuditFeed enabled={false} />);
+    expect(await screen.findByText("Couldn't load skip audit")).toBeTruthy();
+    expect(screen.getByText("This audit feed is unavailable for your current role.")).toBeTruthy();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("loads more rows until the maximum page size", async () => {
+    apiFetch.mockResolvedValue({ ok: true, data: { ...SAMPLE, hasMore: true } });
+    render(<AuditFeed />);
+    await screen.findByText("repo-owner/owned-repo");
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue({ ok: true, data: { ...SAMPLE, hasMore: true, limit: 100 } });
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        "https://api.test/v1/app/skipped-pr-audit?limit=100",
+        expect.any(Object),
+      ),
+    );
+
+    expect(screen.getByText(/maximum page size \(100\)/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
+  });
+
+  it("shows an error state when the audit response is malformed", async () => {
+    apiFetch.mockResolvedValue({ ok: true, data: { generatedAt: "2026-05-28T00:00:05.000Z" } });
+    render(<AuditFeed />);
+    expect(await screen.findByText("Couldn't load skip audit")).toBeTruthy();
+    expect(
+      screen.getByText("The skipped PR audit endpoint returned an unexpected response."),
+    ).toBeTruthy();
   });
 });

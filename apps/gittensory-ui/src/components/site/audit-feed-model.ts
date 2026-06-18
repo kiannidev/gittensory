@@ -50,6 +50,53 @@ export function buildSkippedPrAuditPath(options: {
   return `/v1/app/skipped-pr-audit?${params.toString()}`;
 }
 
+/** Parse a datetime-local or ISO-ish value without throwing from Apply Filters. */
+export function normalizeSinceInput(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return "";
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) return "";
+  const date = new Date(parsed);
+  if (Number.isNaN(date.getTime())) return "";
+  try {
+    return date.toISOString();
+  } catch {
+    return "";
+  }
+}
+
+export function normalizeSkippedPrAuditExport(data: unknown): SkippedPrAuditExport | null {
+  if (!data || typeof data !== "object") return null;
+  const raw = data as Partial<SkippedPrAuditExport>;
+  if (typeof raw.generatedAt !== "string" || !Array.isArray(raw.items)) return null;
+  const items = raw.items.filter(
+    (item): item is SkippedPrAuditItem =>
+      item != null &&
+      typeof item === "object" &&
+      typeof item.repoFullName === "string" &&
+      typeof item.pullNumber === "number" &&
+      typeof item.reason === "string" &&
+      typeof item.timestamp === "string" &&
+      typeof item.remediation === "string",
+  );
+  const filters = raw.filters;
+  return {
+    generatedAt: raw.generatedAt,
+    limit: typeof raw.limit === "number" ? raw.limit : items.length,
+    hasMore: Boolean(raw.hasMore),
+    filters: {
+      repoFullName:
+        filters && typeof filters.repoFullName === "string" ? filters.repoFullName : null,
+      reason:
+        filters && typeof filters.reason === "string"
+          ? (filters.reason as SkippedPrAuditReason)
+          : null,
+      since: filters && typeof filters.since === "string" ? filters.since : null,
+    },
+    items,
+  };
+}
+
 export function formatSkipReason(reason: string): string {
   const match = SKIP_REASON_OPTIONS.find((option) => option.value === reason);
   if (match && match.value) return match.label;
