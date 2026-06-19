@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLatestScoringModelSnapshot, listUpstreamDriftReports } from "../../src/db/repositories";
-import { DEFAULT_SCORING_CONSTANTS, detectActiveModel, findUnmodeledUpstreamConstants, isTimeDecayEnabled, parsePythonNumberConstants, refreshScoringModelSnapshot } from "../../src/scoring/model";
+import { DEFAULT_ISSUE_DISCOVERY_SHARE, DEFAULT_SCORING_CONSTANTS, detectActiveModel, findUnmodeledUpstreamConstants, isTimeDecayEnabled, parsePythonNumberConstants, refreshScoringModelSnapshot } from "../../src/scoring/model";
 import { buildScorePreview, calculateTimeDecay, makeScorePreviewRecord, resolveTimeDecay } from "../../src/scoring/preview";
 import { unmodeledScoringConstantsFingerprint } from "../../src/upstream/unmodeled-scoring-drift";
 import type { ScorePreviewInput } from "../../src/scoring/preview";
@@ -103,8 +103,9 @@ MAX_CODE_DENSITY_MULTIPLIER = 1.15
     expect(DEFAULT_SCORING_CONSTANTS).toMatchObject({
       MAX_OPEN_PR_REVIEW_COLLATERAL_MULTIPLIER: 2.0,
       MAX_LINES_SCORED_FOR_NON_CODE_EXT: 300,
-      DEFAULT_ISSUE_DISCOVERY_SHARE: 0.5,
+      DEFAULT_ISSUE_DISCOVERY_SHARE,
     });
+    expect(DEFAULT_ISSUE_DISCOVERY_SHARE).toBe(0.5);
     expect(
       findUnmodeledUpstreamConstants(`
 MAX_OPEN_PR_REVIEW_COLLATERAL_MULTIPLIER = 2.0

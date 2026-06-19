@@ -1,4 +1,4 @@
-import { DEFAULT_SCORING_CONSTANTS } from "../scoring/model";
+import { DEFAULT_ISSUE_DISCOVERY_SHARE } from "../scoring/model";
 import type { JsonValue, RegistryRepoConfig, RegistrySnapshot, RepoTimeDecayOverrides } from "../types";
 
 type RawRepoConfig = Record<string, JsonValue>;
@@ -58,7 +58,7 @@ function normalizeRepo(repo: string, config: RawRepoConfig): RegistryRepoConfig 
   return {
     repo,
     emissionShare: numberValue(config.emission_share) ?? 0,
-    issueDiscoveryShare: numberValue(config.issue_discovery_share) ?? DEFAULT_SCORING_CONSTANTS.DEFAULT_ISSUE_DISCOVERY_SHARE ?? 0.5,
+    issueDiscoveryShare: numberValue(config.issue_discovery_share) ?? DEFAULT_ISSUE_DISCOVERY_SHARE,
     labelMultipliers,
     trustedLabelPipeline: booleanValue(config.trusted_label_pipeline),
     maintainerCut: numberValue(config.maintainer_cut) ?? 0,
