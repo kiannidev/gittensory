@@ -37,6 +37,7 @@ import {
   upsertRepoSyncState,
   upsertRepositoryFromGitHub,
   persistRepoSnapshot,
+  extractLinkedIssueNumbers,
 } from "../db/repositories";
 import type {
   ContributorRepoStatRecord,
@@ -2682,10 +2683,6 @@ function countObservedLabels(records: Array<{ labels?: Array<{ name?: string }> 
   /* v8 ignore stop */
 }
 
-function extractLinkedIssueNumbers(text: string): number[] {
-  const matches = [...text.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)];
-  return [...new Set(matches.map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0))];
-}
 
 function topItems(values: string[], limit: number): string[] {
   const counts = new Map<string, number>();
