@@ -558,6 +558,9 @@ const scorePreviewSchema = z.object({
   existingContributorTokenScore: z.number().min(0).optional(),
   prAgeHours: z.number().min(0).optional(),
   openPrCount: z.number().int().min(0).optional(),
+  mergedPullRequests: z.number().int().min(0).optional(),
+  validSolvedIssues: z.number().int().min(0).optional(),
+  issueCredibility: z.number().min(0).max(1).optional(),
   credibility: z.number().min(0).max(1).optional(),
   changesRequestedCount: z.number().int().min(0).optional(),
   duplicateRiskCount: z.number().int().min(0).optional(),
@@ -2349,7 +2352,7 @@ export function createApp() {
     if (unauthorized) return unauthorized;
     const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
     const number = Number(c.req.param("number"));
-    if (!Number.isFinite(number)) return c.json({ error: "invalid_pull_number" }, 400);
+    if (!Number.isInteger(number) || number <= 0) return c.json({ error: "invalid_pull_number" }, 400);
     const [repo, pullRequest, issues, pullRequests, files, reviews, checks, recentMergedPullRequests] = await Promise.all([
       getRepository(c.env, fullName),
       getPullRequest(c.env, fullName, number),
@@ -2371,7 +2374,7 @@ export function createApp() {
   app.get("/v1/repos/:owner/:repo/pulls/:number/reviewability", async (c) => {
     const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
     const number = Number(c.req.param("number"));
-    if (!Number.isFinite(number)) return c.json({ error: "invalid_pull_number" }, 400);
+    if (!Number.isInteger(number) || number <= 0) return c.json({ error: "invalid_pull_number" }, 400);
     const [repo, pullRequest, issues, pullRequests, files, reviews, checks, recentMergedPullRequests] = await Promise.all([
       getRepository(c.env, fullName),
       getPullRequest(c.env, fullName, number),
