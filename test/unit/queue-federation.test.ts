@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { createSessionForGitHubUser } from "../../src/auth/security";
 import { createApp } from "../../src/api/routes";
 import { upsertBurdenForecast, upsertQueueFederationSnapshot, upsertRepositoryFromGitHub, upsertRepoQueueTrendSnapshot } from "../../src/db/repositories";
+import { BURDEN_FORECAST_MAX_AGE_MS } from "../../src/services/burden-forecast";
 import { buildFederatedQueueIndex, FEDERATED_QUEUE_INDEX_DEFAULT_LIMIT, FEDERATED_QUEUE_INDEX_MAX_LIMIT } from "../../src/services/queue-federation";
 import { compositeQueuePressureScore } from "../../src/signals/engine";
 import type { JsonValue } from "../../src/types";
@@ -54,6 +56,70 @@ describe("buildFederatedQueueIndex", () => {
     expect(index.entries[0]?.repoFullName).toBe("owner/cached");
   });
 
+  it("recomputes when the cached snapshot is older than the freshness threshold", async () => {
+    const env = createTestEnv();
+    await upsertQueueFederationSnapshot(env, {
+      id: "current",
+      generatedAt: new Date(Date.now() - BURDEN_FORECAST_MAX_AGE_MS - 60_000).toISOString(),
+      repoCount: 1,
+      payload: {
+        entries: [{ repoFullName: "owner/stale", burdenScore: 99, level: "critical", compositeScore: 99, stalePullRequestRate: null, pullRequestGrowth7d: null, freshness: "stale", summary: "stale cache" }],
+      } as unknown as Record<string, JsonValue>,
+    });
+    const index = await buildFederatedQueueIndex(env);
+    expect(index.source).toBe("computed");
+    expect(index.repoCount).toBe(0);
+  });
+
+  it("recomputes when the cached snapshot has an unparseable generatedAt", async () => {
+    const env = createTestEnv();
+    await upsertQueueFederationSnapshot(env, {
+      id: "current",
+      generatedAt: "not-a-timestamp",
+      repoCount: 1,
+      payload: {
+        entries: [{ repoFullName: "owner/stale", burdenScore: 99, level: "critical", compositeScore: 99, stalePullRequestRate: null, pullRequestGrowth7d: null, freshness: "fresh", summary: "stale cache" }],
+      } as unknown as Record<string, JsonValue>,
+    });
+    const index = await buildFederatedQueueIndex(env);
+    expect(index.source).toBe("computed");
+    expect(index.repoCount).toBe(0);
+  });
+
+  it("returns an empty entry list when a fresh snapshot payload has no entries array", async () => {
+    const env = createTestEnv();
+    await upsertQueueFederationSnapshot(env, {
+      id: "current",
+      generatedAt: new Date(Date.now() - 30_000).toISOString(),
+      repoCount: 0,
+      payload: { entries: "not-an-array" } as unknown as Record<string, JsonValue>,
+    });
+    const index = await buildFederatedQueueIndex(env);
+    expect(index.source).toBe("snapshot");
+    expect(index.entries).toEqual([]);
+  });
+
+  it("slices cached snapshot entries to the requested limit", async () => {
+    const env = createTestEnv();
+    await upsertQueueFederationSnapshot(env, {
+      id: "current",
+      generatedAt: new Date(Date.now() - 30_000).toISOString(),
+      repoCount: 3,
+      payload: {
+        entries: [
+          { repoFullName: "owner/a", burdenScore: 90, level: "critical", compositeScore: 90, stalePullRequestRate: null, pullRequestGrowth7d: null, freshness: "fresh", summary: "a" },
+          { repoFullName: "owner/b", burdenScore: 80, level: "high", compositeScore: 80, stalePullRequestRate: null, pullRequestGrowth7d: null, freshness: "fresh", summary: "b" },
+          { repoFullName: "owner/c", burdenScore: 70, level: "high", compositeScore: 70, stalePullRequestRate: null, pullRequestGrowth7d: null, freshness: "fresh", summary: "c" },
+        ],
+      } as unknown as Record<string, JsonValue>,
+    });
+    const index = await buildFederatedQueueIndex(env, 1);
+    expect(index.source).toBe("snapshot");
+    expect(index.entries).toHaveLength(1);
+    expect(index.entries[0]?.repoFullName).toBe("owner/a");
+    expect(index.limitApplied).toBe(1);
+  });
+
   it("includes a repo with a cached burden forecast", async () => {
     const env = createTestEnv();
     await upsertRepositoryFromGitHub(env, { name: "alpha", full_name: "owner/alpha", private: false, owner: { login: "owner" }, default_branch: "main" });
@@ -69,6 +135,22 @@ describe("buildFederatedQueueIndex", () => {
     expect(index.entries[0]?.repoFullName).toBe("owner/alpha");
     expect(index.entries[0]?.level).toBe("high");
     expect(index.entries[0]?.burdenScore).toBe(70);
+  });
+
+  it("defaults burdenScore to zero when the cached forecast omits projectedReviewLoad", async () => {
+    const env = createTestEnv();
+    await upsertRepositoryFromGitHub(env, { name: "no-forecast", full_name: "owner/no-forecast", private: false, owner: { login: "owner" }, default_branch: "main" });
+    await markInstalled(env, "owner/no-forecast");
+    await markRegistered(env, "owner/no-forecast");
+    await upsertBurdenForecast(env, {
+      repoFullName: "owner/no-forecast",
+      payload: { repoFullName: "owner/no-forecast", level: "low", summary: "low burden without forecast block" } as unknown as Record<string, JsonValue>,
+      generatedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const index = await buildFederatedQueueIndex(env);
+    expect(index.repoCount).toBe(1);
+    expect(index.entries[0]?.burdenScore).toBe(0);
+    expect(index.entries[0]?.compositeScore).toBe(0);
   });
 
   it("ranks repos descending by composite score", async () => {
@@ -279,6 +361,21 @@ describe("GET /v1/app/queue-health/federation route", () => {
     const env = createTestEnv();
     const response = await app.request("/v1/app/queue-health/federation?limit=abc", { headers: apiHeaders(env) }, env);
     expect(response.status).toBe(422);
+  });
+
+  it("returns 422 for a limit above the maximum", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+    const response = await app.request(`/v1/app/queue-health/federation?limit=${FEDERATED_QUEUE_INDEX_MAX_LIMIT + 1}`, { headers: apiHeaders(env) }, env);
+    expect(response.status).toBe(422);
+  });
+
+  it("returns 403 for a signed-in user without operator role", async () => {
+    const app = createApp();
+    const env = createTestEnv({ ADMIN_GITHUB_LOGINS: "" });
+    const { token } = await createSessionForGitHubUser(env, { login: "plain-user", id: 50 });
+    const response = await app.request("/v1/app/queue-health/federation", { headers: { cookie: `gittensory_session=${token}` } }, env);
+    expect(response.status).toBe(403);
   });
 
   it("returns 200 with a valid limit parameter", async () => {

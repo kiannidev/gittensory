@@ -86,10 +86,10 @@ describe("MCP contributor access", () => {
     const { token } = await createSessionForGitHubUser(env, { login: "operator-user", id: 10 });
     const identity = await authenticatePrivateToken(env, token);
     if (!identity || identity.kind !== "session") throw new Error("expected session identity");
-    const mcp = new GittensoryMcp(env, identity) as unknown as { getQueueHealthFederation(): Promise<{ summary: string; data: Record<string, unknown> }> };
-    const result = await mcp.getQueueHealthFederation();
+    const mcp = new GittensoryMcp(env, identity) as unknown as { getQueueHealthFederation(limit?: number): Promise<{ summary: string; data: Record<string, unknown> }> };
+    const result = await mcp.getQueueHealthFederation(3);
     expect(typeof result.summary).toBe("string");
-    expect(result.data).toBeDefined();
+    expect(result.data).toMatchObject({ limitApplied: 3 });
   });
 
   it("does not reveal inaccessible bounty ids through advisory errors", async () => {

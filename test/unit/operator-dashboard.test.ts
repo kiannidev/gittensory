@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { upsertBurdenForecast, upsertRepositoryFromGitHub } from "../../src/db/repositories";
 import { buildOperatorDashboardPayload, latestUsageRollup } from "../../src/services/operator-dashboard";
-import type { ProductUsageDailyRollupRecord } from "../../src/types";
+import type { JsonValue, ProductUsageDailyRollupRecord } from "../../src/types";
 import { createTestEnv } from "../helpers/d1";
 
 const FORBIDDEN_EXPORT_TERMS =
@@ -62,6 +63,33 @@ describe("operator dashboard payload", () => {
     );
   });
 
+  it("counts critical and high queue repos in the weekly value report metric", async () => {
+    const env = createTestEnv({ PRODUCT_USAGE_HASH_SALT: "operator-dashboard-critical-queue-salt" });
+    for (const [name, level] of [
+      ["critical-repo", "critical"],
+      ["high-repo", "high"],
+      ["low-repo", "low"],
+    ] as const) {
+      await upsertRepositoryFromGitHub(env, { name, full_name: `owner/${name}`, private: false, owner: { login: "owner" }, default_branch: "main" });
+      await markInstalled(env, `owner/${name}`);
+      await markRegistered(env, `owner/${name}`);
+      await upsertBurdenForecast(env, {
+        repoFullName: `owner/${name}`,
+        payload: {
+          repoFullName: `owner/${name}`,
+          level,
+          forecast: { projectedReviewLoad: level === "low" ? 10 : 80, reviewablePullRequests: 0, stalePullRequests: 0, duplicateTrend: 0, queueGrowthRisk: 0 },
+          summary: `${level} burden`,
+        } as unknown as Record<string, JsonValue>,
+        generatedAt: new Date(Date.now() - 60_000).toISOString(),
+      });
+    }
+    const payload = await buildOperatorDashboardPayload(env);
+    expect(payload.queueFederation.entries.filter((entry) => entry.level === "critical" || entry.level === "high")).toHaveLength(2);
+    const criticalMetric = payload.weeklyValueReport.metrics.find((metric) => metric.id === "top_critical_repos");
+    expect(criticalMetric).toMatchObject({ value: 2, visibility: "operator" });
+  });
+
   it("picks the newest rollup day for adoption insights", () => {
     const rollups: ProductUsageDailyRollupRecord[] = [
       rollup("2026-05-28"),
@@ -119,4 +147,18 @@ function rollup(day: string): ProductUsageDailyRollupRecord {
     generatedAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:00:00.000Z",
   };
+}
+
+async function markInstalled(env: ReturnType<typeof createTestEnv>, fullName: string): Promise<void> {
+  const { getDb } = await import("../../src/db/client");
+  const { repositories } = await import("../../src/db/schema");
+  const { eq } = await import("drizzle-orm");
+  await getDb(env.DB).update(repositories).set({ isInstalled: true }).where(eq(repositories.fullName, fullName));
+}
+
+async function markRegistered(env: ReturnType<typeof createTestEnv>, fullName: string): Promise<void> {
+  const { getDb } = await import("../../src/db/client");
+  const { repositories } = await import("../../src/db/schema");
+  const { eq } = await import("drizzle-orm");
+  await getDb(env.DB).update(repositories).set({ isRegistered: true }).where(eq(repositories.fullName, fullName));
 }

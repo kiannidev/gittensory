@@ -188,9 +188,10 @@ describe("MCP tool calls return schema-valid structured content", () => {
     await mcpServer.connect(serverTransport);
     const client = new Client({ name: "gittensory-output-schema-test", version: "0.1.0" }, { capabilities: {} });
     await client.connect(clientTransport);
-    const result = await client.callTool({ name: "gittensory_queue_health_federation", arguments: {} });
+    const result = await client.callTool({ name: "gittensory_queue_health_federation", arguments: { limit: 2 } });
     expect(result.isError).toBeFalsy();
     const data = result.structuredContent as Record<string, unknown>;
+    expect(data.limitApplied).toBe(2);
     expect(typeof data.repoCount).toBe("number");
     expect(Array.isArray(data.entries)).toBe(true);
     expect(data.source === "snapshot" || data.source === "computed").toBe(true);
