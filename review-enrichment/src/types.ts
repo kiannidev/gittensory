@@ -93,6 +93,20 @@ export interface RedosFinding {
   pattern: string;
 }
 
+/** A newly-added dependency (npm/PyPI) lacking a published provenance attestation, or a binary/vendored file
+ *  committed without auditable source — supply-chain integrity risks the no-checkout reviewer cannot verify. */
+export interface ProvenanceFinding {
+  kind: "no-attestation" | "binary" | "vendored";
+  /** Ecosystem — set for no-attestation findings. */
+  ecosystem?: string;
+  /** Package name — set for no-attestation findings. */
+  package?: string;
+  /** Resolved version — set for no-attestation findings. */
+  version?: string;
+  /** File path — set for binary and vendored findings. */
+  file?: string;
+}
+
 /** A changed file governed by a CODEOWNERS rule where the PR author is not listed as an owner (#1515).
  *  The blast radius (distinct ownership domains crossed) is derived at render time from the full findings set. */
 export interface CodeownersFinding {
@@ -118,6 +132,7 @@ export interface BriefFindings {
   installScript?: InstallScriptFinding[];
   eol?: EolFinding[];
   redos?: RedosFinding[];
+  provenance?: ProvenanceFinding[];
   codeowners?: CodeownersFinding[];
   secretLog?: SecretLogFinding[];
 }

@@ -14,6 +14,7 @@ import { scanInstallScripts } from "./analyzers/install-scripts.js";
 import { scanActionPins } from "./analyzers/actions-pin.js";
 import { scanEol } from "./analyzers/eol-check.js";
 import { scanRedos } from "./analyzers/redos.js";
+import { scanProvenance } from "./analyzers/provenance.js";
 import { scanCodeowners } from "./analyzers/codeowners.js";
 import { scanSecretLog } from "./analyzers/secret-log.js";
 import { renderBrief } from "./render.js";
@@ -29,6 +30,7 @@ const ANALYZERS: Record<keyof BriefFindings, AnalyzerFn> = {
   actionPin: (req) => scanActionPins(req),
   eol: (req) => scanEol(req),
   redos: (req) => scanRedos(req),
+  provenance: (req, signal) => scanProvenance(req, fetch, { signal }),
   codeowners: (req, signal) => scanCodeowners(req, fetch, { signal }),
   secretLog: (req, signal) => scanSecretLog(req, signal),
 };
