@@ -39,9 +39,10 @@ const REGISTRY_HYPERPARAMETER_DRIFT_LIMIT = 100;
 /** True when a ruleset snapshot's `generatedAt` is missing/unparseable or older than the staleness window.
  *  Unparseable timestamps fail closed (treated as stale) — mirrors the `Number.isFinite(ageMs)` guard in backfill. */
 export function isUpstreamRulesetStale(
-  generatedAt: string,
+  generatedAt: string | null | undefined,
   nowMs: number = Date.now(),
 ): boolean {
+  if (!generatedAt) return true;
   const parsedMs = Date.parse(generatedAt);
   if (!Number.isFinite(parsedMs)) return true;
   return parsedMs + UPSTREAM_STALE_MS < nowMs;
@@ -701,14 +702,20 @@ const REGISTRY_DRIFT_FIELD_METADATA: Record<RegistryHyperparameterDriftField, { 
 };
 
 function buildRegistryHyperparameterDrift(previous: RulesetRegistryRepo[], current: RulesetRegistryRepo[]): RegistryHyperparameterDriftPayload {
-  const previousByRepo = new Map(previous.map((repo) => [repo.repo, repo]));
-  const currentByRepo = new Map(current.map((repo) => [repo.repo, repo]));
+  // Repo identity is case-insensitive upstream: registryHyperparameterDriftWarningsForRepo compares names with
+  // toLowerCase and the registry normalizer dedupes by lowercased name. Keying these maps by the raw,
+  // case-sensitive `repo` string made a casing-only rename (e.g. `Owner/Repo` -> `owner/repo`) surface as a
+  // spurious high-severity `added` + `removed` pair even when every hyperparameter was unchanged. Match by the
+  // lowercased name so a casing-only change resolves to the same repo (its comparable fields then diff to zero
+  // events), while genuine additions, removals, and field changes are still detected. (#1792)
+  const previousByRepo = new Map(previous.map((repo) => [registryRepoKey(repo), repo]));
+  const currentByRepo = new Map(current.map((repo) => [registryRepoKey(repo), repo]));
   const events = [
     ...current.flatMap((repo) => {
-      const old = previousByRepo.get(repo.repo);
+      const old = previousByRepo.get(registryRepoKey(repo));
       return old ? changedRegistryRepoEvents(old, repo) : [registryHyperparameterDriftEvent(repo.repo, "repo", null, "added", "added")];
     }),
-    ...previous.flatMap((repo) => (currentByRepo.has(repo.repo) ? [] : [registryHyperparameterDriftEvent(repo.repo, "repo", "present", null, "removed")])),
+    ...previous.flatMap((repo) => (currentByRepo.has(registryRepoKey(repo)) ? [] : [registryHyperparameterDriftEvent(repo.repo, "repo", "present", null, "removed")])),
   ].sort(compareRegistryHyperparameterDriftEvents);
   const capped = events.slice(0, REGISTRY_HYPERPARAMETER_DRIFT_LIMIT);
   return {
@@ -718,6 +725,12 @@ function buildRegistryHyperparameterDrift(previous: RulesetRegistryRepo[], curre
     unidentifiedAffectedRepoCount: 0,
     omittedEvents: Math.max(events.length - capped.length, 0),
   };
+}
+
+// Case-insensitive identity key for matching the same registry repo across two ruleset snapshots, mirroring the
+// lowercasing in registryHyperparameterDriftWarningsForRepo and the registry normalizer. (#1792)
+function registryRepoKey(repo: RulesetRegistryRepo): string {
+  return repo.repo.toLowerCase();
 }
 
 function changedRegistryRepoEvents(previous: RulesetRegistryRepo, current: RulesetRegistryRepo): RegistryHyperparameterDriftEvent[] {
@@ -1081,13 +1094,14 @@ async function validateRecordedGitHubIssue(repo: string, token: string, report: 
   }
 }
 
-function parseGitHubIssueUrl(issueUrl: string): { owner: string; name: string; number: number } | null {
+export function parseGitHubIssueUrl(issueUrl: string): { owner: string; name: string; number: number } | null {
   try {
     const url = new URL(issueUrl);
     if (url.hostname.toLowerCase() !== "github.com") return null;
     const [owner, name, issues, issueNumber, ...rest] = url.pathname.split("/").filter(Boolean);
+    if (!issueNumber || !/^\d+$/.test(issueNumber)) return null;
     const number = Number(issueNumber);
-    if (!owner || !name || issues !== "issues" || rest.length > 0 || !Number.isInteger(number) || number <= 0) return null;
+    if (!owner || !name || issues !== "issues" || rest.length > 0 || !Number.isSafeInteger(number) || number <= 0) return null;
     return { owner, name, number };
   } catch {
     return null;
