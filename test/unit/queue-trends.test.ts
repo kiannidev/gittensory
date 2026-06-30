@@ -70,7 +70,11 @@ describe("queue trend windows", () => {
     for (const window of report.windows.filter((entry) => entry.status === "ready")) {
       expect(window.reviewVelocityPerDay).not.toBe(Infinity);
       expect(window.summary).not.toContain("Infinity");
-      expect(Number.isFinite(window.reviewVelocityPerDay)).toBe(true);
+      if (window.observedDays > 0) {
+        expect(Number.isFinite(window.reviewVelocityPerDay)).toBe(true);
+      } else {
+        expect(window.reviewVelocityPerDay).toBeNull();
+      }
     }
     expect(report.windows[0]).toMatchObject({
       windowDays: 7,
