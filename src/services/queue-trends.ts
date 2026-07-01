@@ -97,7 +97,13 @@ function buildWindow(windowDays: 7 | 14 | 30, totals: RepoGithubTotalsSnapshotRe
   const stalePullRequestRate = latestQueue ? staleRate(latestQueue) : null;
   const baselineStaleRate = baselineQueue ? staleRate(baselineQueue) : null;
   const duplicateTrend = latestQueue && baselineQueue ? latestQueue.collisionClusters - baselineQueue.collisionClusters : null;
-  const reviewVelocityPerDay = round((mergedPullRequests + closedUnmergedPullRequests) / observedDays);
+  const priorTotals = totals.length >= 2 ? totals.at(-2) : undefined;
+  const duplicateLatestTotals =
+    priorTotals !== undefined && Date.parse(priorTotals.fetchedAt) === latestMs;
+  const reviewVelocityPerDay =
+    duplicateLatestTotals || observedDays <= 0
+      ? null
+      : round((mergedPullRequests + closedUnmergedPullRequests) / observedDays);
   const pullRequestGrowth = latest.openPullRequestsTotal - baseline.openPullRequestsTotal;
   return {
     windowDays,
@@ -113,7 +119,7 @@ function buildWindow(windowDays: 7 | 14 | 30, totals: RepoGithubTotalsSnapshotRe
     stalePullRequestRate,
     stalePullRequestRateDelta: stalePullRequestRate !== null && baselineStaleRate !== null ? round(stalePullRequestRate - baselineStaleRate) : null,
     duplicateTrend,
-    summary: `${windowDays}d trend: PR queue ${signed(pullRequestGrowth)}, review velocity ${reviewVelocityPerDay}/day.`,
+    summary: `${windowDays}d trend: PR queue ${signed(pullRequestGrowth)}, review velocity ${reviewVelocityPerDay ?? "n/a"}/day.`,
   };
 }
 
