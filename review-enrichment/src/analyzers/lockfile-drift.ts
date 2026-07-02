@@ -10,7 +10,7 @@ import type {
 import type { AnalysisContext } from "../analysis-context.js";
 import { extractDependencyChanges } from "./dependency-scan.js";
 import { boundedFetchJson } from "../external-fetch.js";
-import { isSupportedLockfile, lockfileBasename } from "../lockfile-path.js";
+import { isParseableLockfile, lockfileBasename } from "../lockfile-path.js";
 
 interface LockfileChange {
   file: string;
@@ -350,7 +350,7 @@ export function extractLockfileChanges(
   const changes: LockfileChange[] = [];
   let scannedFiles = 0;
   for (const file of files) {
-    if (!file.patch || !isSupportedLockfile(file.path)) continue;
+    if (!file.patch || !isParseableLockfile(file.path)) continue;
     scannedFiles += 1;
     if (scannedFiles > maxFiles) break;
     for (const change of parseLockfile(file.path, file.patch, maxLines)) {
