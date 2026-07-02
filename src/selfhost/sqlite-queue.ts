@@ -15,6 +15,7 @@ import {
   FOREGROUND_QUEUE_PRIORITY_FLOOR,
   githubRateLimitAdmissionDelayMs,
   githubRateLimitAdmissionTargetForJob,
+  errorMessageWithCause,
   githubRateLimitMetricContext,
   githubRateLimitRetryDelayMs,
   buildSelfHostQueueSnapshot,
@@ -22,6 +23,7 @@ import {
   jobCoalesceKey,
   jobCoalesceSupersededKeyPrefix,
   jobPriority,
+  parsePositiveIntEnv,
   queueBackgroundConcurrency,
   queueProcessingTimeoutMs,
   queueRecoveryJitterMs,
@@ -103,7 +105,7 @@ export function createSqliteQueue(
     ((attempt: number) => Math.min(60_000, 1000 * 2 ** attempt));
   const concurrency =
     opts.concurrency ??
-    Math.max(1, Number(process.env.QUEUE_CONCURRENCY ?? "4"));
+    parsePositiveIntEnv("QUEUE_CONCURRENCY", { min: 1, fallback: 4 });
   const backgroundConcurrency = queueBackgroundConcurrency(
     concurrency,
     opts.backgroundConcurrency,
@@ -380,7 +382,7 @@ export function createSqliteQueue(
         }, jobTraceParent);
       } catch (error) {
         const attempts = job.attempts + 1;
-        const errMsg = error instanceof Error ? error.message : "unknown error";
+        const errMsg = errorMessageWithCause(error);
         const rateLimitDelayMs = githubRateLimitRetryDelayMs(error);
         if (rateLimitDelayMs !== null) {
           const now = Date.now();

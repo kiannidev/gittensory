@@ -156,8 +156,8 @@ import {
   buildIssueAdvisory,
   buildPullRequestAdvisory,
   evaluateGateCheck,
-  isTestPath,
 } from "../rules/advisory";
+import { isTestPath } from "../signals/test-evidence";
 import { detectNotificationEvents } from "../notifications/events";
 import {
   deliverNotification,
@@ -1704,7 +1704,7 @@ async function maybeRunAgentMaintenance(
   // critical section (extracted below so the try/finally doesn't force-reindent that whole block); a pass that
   // loses the race defers cleanly — the next webhook/sweep tick is the backstop. Lightweight stand-in for the
   // per-PR SubmissionLock Durable Object noted as a longer-term TODO in env.d.ts.
-  if (!(await claimAgentMaintenanceLock(env, repoFullName, pr.number))) return;
+  if (!(await claimPrActuationLock(env, repoFullName, pr.number))) return;
   try {
     await runAgentMaintenancePlanAndExecute(env, {
       installationId,
@@ -1718,7 +1718,7 @@ async function maybeRunAgentMaintenance(
       liveFacts: args.liveFacts,
     });
   } finally {
-    await releaseAgentMaintenanceLock(env, repoFullName, pr.number);
+    await releasePrActuationLock(env, repoFullName, pr.number);
   }
 }
 
@@ -2305,6 +2305,59 @@ async function putTransientKey(
   }
 }
 
+// ONE shared per-PR actuation mutex (#2129/#2135) for every mutating PR pass: the sweep/webhook-driven
+// maintenance plan-and-execute, the draft-dodge close, and the reopen-reclose. These are three INDEPENDENTLY
+// triggered webhook/sweep paths for the SAME PR (e.g. a `reopened` event and a concurrent `check_suite
+// completed` event, or a sweep tick racing either) that can be dequeued by separate workers at nearly the same
+// time; each would read its own stale-but-still-"current" state, each would pass its own freshness checks, and
+// each could independently fire a mutating call for the same PR. A single lock namespace is deliberate: separate
+// per-path locks (the original design) do not exclude each other, so a maintenance pass and a draft-dodge close
+// could still race — the whole point of this mutex is to make "does something else already own this PR" one
+// question with one answer, not one question per code path (review round 4). This is a lightweight interim
+// mutex (a full per-PR Durable Object / SubmissionLock is a separate, more-involved follow-up — see the TODO in
+// env.d.ts) built on the SAME transient cache used for CI-completion coalescing above, claimed ATOMICALLY (see
+// claimTransientLock) so two racing deliveries can never both win the claim — a short TTL, best-effort release.
+// A lock-contended caller fails OPEN (returns false / skips this pass) rather than blocking — the delivery
+// holding the lock is evaluating the SAME PR, and the periodic sweep is the backstop if this specific trigger is
+// dropped. A cache adapter with no claim() primitive gets NO exclusivity at all (every call proceeds) rather
+// than a get-then-set pair that only *looks* atomic — see claimTransientLock's doc comment for why that fallback
+// was removed.
+//
+// KNOWN LIMITATION: the lock value is a constant, not a per-holder ownership token, so release does not verify
+// it still owns the key — if a holder ran past the TTL, a later claimer's live lock could be deleted by the
+// first holder's stale `finally` release, reopening the exact race this mutex exists to close. A per-holder
+// token + a conditional (check-then-delete) release would close this properly, but needs a new atomic
+// compare-and-delete primitive on the cache adapter — tracked alongside the Durable Object follow-up above. The
+// TTL is set generously long specifically so this window is practically unreachable: the guarded operations
+// (a handful of sequential GitHub API calls, or a maintenance pass's plan-and-execute) should never legitimately
+// run anywhere near this long.
+const PR_ACTUATION_LOCK_TTL_SECONDS = 600;
+function prActuationLockKey(repoFullName: string, prNumber: number): string {
+  return `pr-actuation-lock:${repoFullName.toLowerCase()}#${prNumber}`;
+}
+export async function claimPrActuationLock(
+  env: Env,
+  repoFullName: string,
+  prNumber: number,
+): Promise<boolean> {
+  return claimTransientLock(
+    env,
+    prActuationLockKey(repoFullName, prNumber),
+    PR_ACTUATION_LOCK_TTL_SECONDS,
+  );
+}
+export async function releasePrActuationLock(
+  env: Env,
+  repoFullName: string,
+  prNumber: number,
+): Promise<void> {
+  try {
+    await env.SELFHOST_TRANSIENT_CACHE?.del?.(prActuationLockKey(repoFullName, prNumber));
+  } catch {
+    // best-effort
+  }
+}
+
 /**
  * True when CI for this PR+headSha has been pending past STUCK_CI_DEFER_MS. Stamps the first-seen time in a
  * transient cache keyed by repo#pr:headSha — a new push is a new SHA, so the window resets per commit. A missing
@@ -2474,53 +2527,14 @@ async function claimTransientLock(
   }
 }
 
-// Per-PR advisory lock around maybeRunAgentMaintenance's plan-and-execute critical section (#2129). The TTL is a
-// crash-safety backstop only — the normal path releases explicitly in a finally block within a few seconds — so
-// it is sized well above any realistic pass duration (matches CI_COALESCE_WINDOW_SECONDS, an already-vetted
-// value for a comparable-scale operation in this file), not to bound throughput.
-const AGENT_MAINTENANCE_LOCK_TTL_SECONDS = 60;
-
-function agentMaintenanceLockKey(repoFullName: string, prNumber: number): string {
-  return `agent-maintenance-lock:${repoFullName.toLowerCase()}#${prNumber}`;
-}
-
-/**
- * Claim the per-PR advisory lock. Returns false when another pass already holds it (caller must skip this pass
- * — the next webhook/sweep tick is the backstop). A missing cache or cache hiccup fails OPEN (returns true —
- * the lock is a defense-in-depth serializer, not the primary safety gate, and must never itself block actuation).
- */
-export async function claimAgentMaintenanceLock(
-  env: Env,
-  repoFullName: string,
-  prNumber: number,
-): Promise<boolean> {
-  return claimTransientLock(
-    env,
-    agentMaintenanceLockKey(repoFullName, prNumber),
-    AGENT_MAINTENANCE_LOCK_TTL_SECONDS,
-  );
-}
-
-/** Best-effort release, called from a finally block so the lock frees promptly instead of waiting out the TTL. */
-export async function releaseAgentMaintenanceLock(
-  env: Env,
-  repoFullName: string,
-  prNumber: number,
-): Promise<void> {
-  try {
-    await env.SELFHOST_TRANSIENT_CACHE?.del?.(
-      agentMaintenanceLockKey(repoFullName, prNumber),
-    );
-  } catch {
-    // best-effort; the TTL is the backstop if release fails
-  }
-}
-
 // Per-(repo, PR, head SHA) advisory lock around runAiReviewForAdvisory's expensive grounding/RAG/enrichment/LLM
 // section (#confirmed-bug: a webhook pass and an agent-regate-pr sweep pass can independently reach this same
 // code for the SAME PR at the SAME head SHA, both miss the cache, and both fire a real LLM call — which can
 // return DIFFERENT verdicts). The TTL is a crash-safety backstop only (see AI_REVIEW_LOCK_TTL_SECONDS below), not
-// a throughput bound — same philosophy as AGENT_MAINTENANCE_LOCK_TTL_SECONDS (#2129/#2368).
+// a throughput bound — same philosophy as PR_ACTUATION_LOCK_TTL_SECONDS (#2129/#2368). Deliberately its OWN lock
+// namespace, not the shared pr-actuation-lock above: this guards an expensive read-and-cache (dedup a redundant
+// LLM call for the identical head+mode), not a GitHub-mutating actuation, so it has different scoping (keyed by
+// head SHA + mode, not just PR) and a much longer TTL (an LLM call legitimately runs far longer than a close).
 const AI_REVIEW_LOCK_TTL_SECONDS = 1_800; // 30 minutes — see justification below.
 
 function aiReviewLockKey(repoFullName: string, prNumber: number, headSha: string, mode: string): string {
@@ -3736,19 +3750,26 @@ async function processGitHubWebhook(
       // Reopen-prevention (#one-shot-reopen): a CONTRIBUTOR may not reopen a PR that gittensory or a maintainer
       // closed — closes are one-shot (resubmit, don't reopen). If a non-maintainer reopened a PR whose last close
       // was by the bot / repo owner / admin, re-close it and skip the re-review. Self-closes (the contributor
-      // closed their own PR) stay reopenable; the bot's own nightly-re-review reopens are exempt.
-      if (
-        payload.action === "reopened" &&
-        installationId &&
-        (await maybeRecloseDisallowedReopen(
-          env,
-          deliveryId,
-          installationId,
-          repoFullName,
-          pr,
-          payload,
-        ).catch(() => false))
-      ) {
+      // closed their own PR) stay reopenable; the bot's own nightly-re-review reopens are exempt. A contended
+      // actuation lock ALSO skips the re-review (#2135, review round 3) — the winning delivery already owns
+      // this PR, so this pass must not evaluate/mutate it concurrently under a false "not blocked" reading.
+      // Deliberately UNCAUGHT here: every step inside maybeRecloseDisallowedReopen already fails safe on its own
+      // (the lock claim/release fail open; recloseDisallowedReopenIfNeeded's own operations all .catch()), so a
+      // swallowing catch at this call site could only ever mask a genuinely unexpected error into a silent
+      // "allowed" — which would re-permit exactly the disallowed reopen this guard exists to stop. Let it
+      // propagate and retry instead, same reasoning as the draft-dodge sibling's uncaught getInstallation read.
+      const reopenOutcome: ReopenRecloseOutcome =
+        payload.action === "reopened" && installationId
+          ? await maybeRecloseDisallowedReopen(
+              env,
+              deliveryId,
+              installationId,
+              repoFullName,
+              pr,
+              payload,
+            )
+          : "allowed";
+      if (reopenOutcome === "reclosed" || reopenOutcome === "lock_contended") {
         // Stamp the delivery processed like every other owning path — the early return otherwise leaves the
         // webhook_events row stuck at "queued"/its body hash, mis-reporting the delivery as un-acked (#review-audit).
         await recordWebhookEvent(env, {
@@ -3806,167 +3827,18 @@ async function processGitHubWebhook(
         !settings.agentPaused &&
         !isProtectedAutomationAuthor(pr.authorLogin)
       ) {
-        const block = await getGateBlockOutcome(
+        // Deliberately UNCAUGHT here: closeDraftDodgeAttemptIfBlocked catches every operation that should
+        // fail safely, but leaves the write-permission-readiness getInstallation read (#2134) uncaught on
+        // purpose so a transient D1 failure propagates and the queue retries instead of misrecording a
+        // permission denial.
+        await maybeCloseDraftDodgeAttempt(
           env,
+          deliveryId,
+          installationId,
           repoFullName,
-          pr.number,
-        ).catch(() => undefined);
-        const repoOwner = repoFullName.includes("/")
-          ? repoFullName.slice(0, repoFullName.indexOf("/")).toLowerCase()
-          : "";
-        const draftDodgeAuthorLogin = (pr.authorLogin ?? "").toLowerCase();
-        const authorIsOwner =
-          draftDodgeAuthorLogin === repoOwner && repoOwner.length > 0;
-        // Fleet-operator identity (#2133): same ADMIN_GITHUB_LOGINS exemption as the primary close-eligibility
-        // computation above and hasMaintainerPermission below — an admin login must never be auto-closed here
-        // either, matching every other actuation path's trusted-operator definition.
-        const authorIsAdmin =
-          draftDodgeAuthorLogin.length > 0 &&
-          parseGitHubLoginList(env.ADMIN_GITHUB_LOGINS).has(draftDodgeAuthorLogin);
-        if (
-          block &&
-          block.headSha === pr.headSha &&
-          !block.overridden &&
-          !authorIsOwner &&
-          !authorIsAdmin
-        ) {
-          // Respect the agent action mode (#killswitch-gap): the outer guard already excludes a per-repo pause,
-          // but this close path must also honor the global freeze and dry-run — so a freeze is a COMPLETE stop
-          // and a dry-run records the would-be close without touching GitHub.
-          const draftMode = resolveAgentActionMode({
-            globalPaused:
-              isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
-            agentPaused: settings.agentPaused,
-            agentDryRun: settings.agentDryRun,
-          });
-          if (draftMode === "live") {
-            // Write-permission readiness (#2134): this close bypasses executeAgentMaintenanceActions entirely
-            // (the whole point is to enforce the gate verdict against the CURRENT headSha even though the PR
-            // was converted to draft), so it never got the standard pipeline's step-6 PR_WRITE_CLASSES guard.
-            // Without this, a revoked/never-consented pull_requests:write grant would still attempt the close,
-            // get a 403 from GitHub, and have it silently swallowed by the .catch() below — with the audit
-            // event still recorded as "completed" as if the close actually happened. Checked BEFORE the live
-            // freshness re-check below so a permission-denied installation never pays for a live GitHub fetch.
-            // Deliberately UNCAUGHT: getInstallation itself never swallows a genuine D1 read failure (it only
-            // resolves null on a legitimate "row not found" query result), so let a transient storage hiccup
-            // propagate and fail this whole webhook job -- the queue's own retry re-runs it, and a later attempt
-            // with a working DB read correctly evaluates readiness. Catching it into `null` here would instead
-            // permanently misrecord the outcome as "pull_requests: write not granted" (a real GitHub-permission
-            // problem) when the actual cause was an infra blip, misleading an operator investigating the audit
-            // trail and burying the fact that no retry ever happens for a caught, definitively-denied outcome.
-            const draftDodgeInstallation = await getInstallation(
-              env,
-              installationId,
-            );
-            /* v8 ignore next -- upsertInstallation already ran unconditionally earlier in this same handler for
-             * every webhook, so a genuinely-missing row is not reachable through the normal webhook path
-             * exercised by tests; a synced installation always has a permissions object. */
-            const draftDodgeInstallationPermissions = draftDodgeInstallation?.permissions ?? null;
-            const draftDodgePermissionReadiness = resolveAgentPermissionReadiness({
-              autonomy: settings.autonomy,
-              installationPermissions: draftDodgeInstallationPermissions,
-            });
-            if (draftDodgePermissionReadiness !== "ready") {
-              /* v8 ignore next -- a deleted-account PR yields a null author login; the fallback is defensive */
-              const draftDodgeAuthor = pr.authorLogin ?? "unknown";
-              await recordAuditEvent(env, {
-                eventType: "github_app.draft_dodge_closed",
-                actor: "gittensory",
-                targetKey: `${repoFullName}#${pr.number}`,
-                outcome: "denied",
-                detail: `denied draft-dodge close for ${draftDodgeAuthor} — pull_requests: write not granted`,
-                metadata: {
-                  deliveryId,
-                  repoFullName,
-                  headSha: pr.headSha,
-                  blockerCodes: block.blockerCodes,
-                },
-              }).catch(
-                /* v8 ignore next -- fail-safe: an audit write failure never blocks the handler */
-                () => undefined,
-              );
-            } else {
-              // Live re-check (#2130): the two async DB reads above (getGateBlockOutcome, resolveAgentActionMode's
-              // isGlobalAgentFrozen) leave a window where a maintainer could merge/close the PR, or a fresh push
-              // could clear the gate failure, before this fires. Unlike the main gate-close path — which routes
-              // every close through executeAgentMaintenanceActions's freshness guard — this handler acted purely
-              // off the stale webhook-ingestion payload. Re-verify live state immediately before the mutation.
-              // requireDraft: head/state alone would still read "current" if the author converted the PR BACK
-              // to ready_for_review in that window -- the draft-dodge close's own justification no longer
-              // holds, since there is no longer a draft to be "dodging" the gate through.
-              const freshness = await fetchPullRequestFreshness(env, {
-                installationId,
-                repoFullName,
-                pullNumber: pr.number,
-                expectedHeadSha: pr.headSha,
-                requireDraft: true,
-              });
-              if (freshness.status !== "current") {
-                await recordAuditEvent(env, {
-                  eventType: "github_app.draft_dodge_closed",
-                  actor: "gittensory",
-                  targetKey: `${repoFullName}#${pr.number}`,
-                  outcome: "denied",
-                  detail: `${pullRequestFreshnessDetail(freshness)} — draft-dodge close not executed`,
-                  metadata: {
-                    deliveryId,
-                    repoFullName,
-                    headSha: pr.headSha,
-                    blockerCodes: block.blockerCodes,
-                  },
-                }).catch(() => undefined);
-              } else {
-                const codes = block.blockerCodes.join(", ");
-                await createIssueComment(
-                  env,
-                  installationId,
-                  repoFullName,
-                  pr.number,
-                  `Gate verdict stands for this commit — converting to draft does not reset the review. Re-submit a new PR with the issues addressed${codes ? ` (${codes})` : ""}.`,
-                ).catch(() => undefined);
-                await closePullRequest(
-                  env,
-                  installationId,
-                  repoFullName,
-                  pr.number,
-                ).catch(() => undefined);
-                await recordAuditEvent(env, {
-                  eventType: "github_app.draft_dodge_closed",
-                  actor: "gittensory",
-                  targetKey: `${repoFullName}#${pr.number}`,
-                  outcome: "completed",
-                  detail: `closed draft-dodge attempt by ${pr.authorLogin ?? "unknown"} — prior gate failure on headSha ${pr.headSha} stands`,
-                  metadata: {
-                    deliveryId,
-                    repoFullName,
-                    headSha: pr.headSha,
-                    blockerCodes: block.blockerCodes,
-                  },
-                }).catch(() => undefined);
-              }
-            }
-          } else if (draftMode === "dry_run") {
-            /* v8 ignore next -- a deleted-account PR yields a null author login; the fallback is defensive */
-            const draftAuthor = pr.authorLogin ?? "unknown";
-            await recordAuditEvent(env, {
-              eventType: "github_app.draft_dodge_closed",
-              actor: "gittensory",
-              targetKey: `${repoFullName}#${pr.number}`,
-              outcome: "completed",
-              detail: `dry-run: would close draft-dodge attempt by ${draftAuthor} — prior gate failure on headSha ${pr.headSha} stands`,
-              metadata: {
-                deliveryId,
-                repoFullName,
-                headSha: pr.headSha,
-                blockerCodes: block.blockerCodes,
-                mode: "dry_run",
-              },
-            }).catch(
-              /* v8 ignore next -- fail-safe: an audit write failure never blocks the handler */
-              () => undefined,
-            );
-          }
-        }
+          pr,
+          settings,
+        );
       }
       if (
         installationId &&
@@ -4738,7 +4610,7 @@ export async function runAiReviewForAdvisory(
     }))
   )
     return undefined;
-  // Per-(repo, PR, head SHA, mode) advisory lock (#confirmed-bug, mirrors #2129/#2368's claimAgentMaintenanceLock):
+  // Per-(repo, PR, head SHA, mode) advisory lock (#confirmed-bug, mirrors #2129/#2368's claimPrActuationLock):
   // a webhook pass and an agent-regate-pr sweep pass can independently reach this point for the SAME PR at the
   // SAME head, both miss the cache (neither has written yet), and both fire a real, wasteful LLM call that can
   // return different verdicts. Claim before the expensive section below; a pass that loses the race returns the
@@ -7865,10 +7737,243 @@ async function recordPrPanelRetriggerSkip(
   });
 }
 
+/** Draft-dodge guard (#converted-to-draft): a contributor converting an OPEN PR to draft cannot use draft state
+ *  to keep a gate-rejected PR alive. When a prior gate failure exists for the PR's current headSha (and the
+ *  block has not been maintainer-overridden), close the PR immediately — the gate verdict stands and does not
+ *  reset on draft conversion. Per-PR actuation-locked (#2135): a concurrent delivery for the same PR must not
+ *  evaluate + potentially mutate it at the same time. Lock-contended is a silent no-op for this pass — the
+ *  delivery holding the lock is handling this PR. */
+async function maybeCloseDraftDodgeAttempt(
+  env: Env,
+  deliveryId: string,
+  installationId: number,
+  repoFullName: string,
+  pr: PullRequestRecord,
+  settings: RepositorySettings,
+): Promise<void> {
+  if (!(await claimPrActuationLock(env, repoFullName, pr.number))) return;
+  try {
+    await closeDraftDodgeAttemptIfBlocked(
+      env,
+      deliveryId,
+      installationId,
+      repoFullName,
+      pr,
+      settings,
+    );
+  } finally {
+    await releasePrActuationLock(env, repoFullName, pr.number);
+  }
+}
+
+async function closeDraftDodgeAttemptIfBlocked(
+  env: Env,
+  deliveryId: string,
+  installationId: number,
+  repoFullName: string,
+  pr: PullRequestRecord,
+  settings: RepositorySettings,
+): Promise<void> {
+  const block = await getGateBlockOutcome(
+    env,
+    repoFullName,
+    pr.number,
+  ).catch(() => undefined);
+  const repoOwner = repoFullName.includes("/")
+    ? repoFullName.slice(0, repoFullName.indexOf("/")).toLowerCase()
+    : "";
+  const draftDodgeAuthorLogin = (pr.authorLogin ?? "").toLowerCase();
+  const authorIsOwner =
+    draftDodgeAuthorLogin === repoOwner && repoOwner.length > 0;
+  // Fleet-operator identity (#2133): same ADMIN_GITHUB_LOGINS exemption as the primary close-eligibility
+  // computation elsewhere — an admin login must never be auto-closed here either, matching every other
+  // actuation path's trusted-operator definition.
+  const authorIsAdmin =
+    draftDodgeAuthorLogin.length > 0 &&
+    parseGitHubLoginList(env.ADMIN_GITHUB_LOGINS).has(draftDodgeAuthorLogin);
+  if (
+    block &&
+    block.headSha === pr.headSha &&
+    !block.overridden &&
+    !authorIsOwner &&
+    !authorIsAdmin
+  ) {
+    // Respect the agent action mode (#killswitch-gap): the outer guard already excludes a per-repo pause,
+    // but this close path must also honor the global freeze and dry-run — so a freeze is a COMPLETE stop
+    // and a dry-run records the would-be close without touching GitHub.
+    const draftMode = resolveAgentActionMode({
+      globalPaused:
+        isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)),
+      agentPaused: settings.agentPaused,
+      agentDryRun: settings.agentDryRun,
+    });
+    if (draftMode === "live") {
+      // Write-permission readiness (#2134): this close bypasses executeAgentMaintenanceActions entirely
+      // (the whole point is to enforce the gate verdict against the CURRENT headSha even though the PR
+      // was converted to draft), so it never got the standard pipeline's step-6 PR_WRITE_CLASSES guard.
+      // Without this, a revoked/never-consented pull_requests:write grant would still attempt the close,
+      // get a 403 from GitHub, and have it silently swallowed by the .catch() below — with the audit
+      // event still recorded as "completed" as if the close actually happened. Checked BEFORE the live
+      // freshness re-check below so a permission-denied installation never pays for a live GitHub fetch.
+      // Deliberately UNCAUGHT: getInstallation itself never swallows a genuine D1 read failure (it only
+      // resolves null on a legitimate "row not found" query result), so let a transient storage hiccup
+      // propagate and fail this whole webhook job -- the queue's own retry re-runs it, and a later attempt
+      // with a working DB read correctly evaluates readiness. Catching it into `null` here would instead
+      // permanently misrecord the outcome as "pull_requests: write not granted" (a real GitHub-permission
+      // problem) when the actual cause was an infra blip, misleading an operator investigating the audit
+      // trail and burying the fact that no retry ever happens for a caught, definitively-denied outcome.
+      const draftDodgeInstallation = await getInstallation(
+        env,
+        installationId,
+      );
+      /* v8 ignore next -- upsertInstallation already ran unconditionally earlier in this same handler for
+       * every webhook, so a genuinely-missing row is not reachable through the normal webhook path
+       * exercised by tests; a synced installation always has a permissions object. */
+      const draftDodgeInstallationPermissions = draftDodgeInstallation?.permissions ?? null;
+      const draftDodgePermissionReadiness = resolveAgentPermissionReadiness({
+        autonomy: settings.autonomy,
+        installationPermissions: draftDodgeInstallationPermissions,
+      });
+      if (draftDodgePermissionReadiness !== "ready") {
+        /* v8 ignore next -- a deleted-account PR yields a null author login; the fallback is defensive */
+        const draftDodgeAuthor = pr.authorLogin ?? "unknown";
+        await recordAuditEvent(env, {
+          eventType: "github_app.draft_dodge_closed",
+          actor: "gittensory",
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "denied",
+          detail: `denied draft-dodge close for ${draftDodgeAuthor} — pull_requests: write not granted`,
+          metadata: {
+            deliveryId,
+            repoFullName,
+            headSha: pr.headSha,
+            blockerCodes: block.blockerCodes,
+          },
+        }).catch(
+          /* v8 ignore next -- fail-safe: an audit write failure never blocks the handler */
+          () => undefined,
+        );
+        return;
+      }
+      // Live re-check (#2130): the two async DB reads above (getGateBlockOutcome, resolveAgentActionMode's
+      // isGlobalAgentFrozen) leave a window where a maintainer could merge/close the PR, or a fresh push
+      // could clear the gate failure, before this fires. Unlike the main gate-close path — which routes
+      // every close through executeAgentMaintenanceActions's freshness guard — this handler acted purely
+      // off the stale webhook-ingestion payload. Re-verify live state immediately before the mutation.
+      // requireDraft: head/state alone would still read "current" if the author converted the PR BACK
+      // to ready_for_review in that window -- the draft-dodge close's own justification no longer
+      // holds, since there is no longer a draft to be "dodging" the gate through.
+      const freshness = await fetchPullRequestFreshness(env, {
+        installationId,
+        repoFullName,
+        pullNumber: pr.number,
+        expectedHeadSha: pr.headSha,
+        requireDraft: true,
+      });
+      if (freshness.status !== "current") {
+        await recordAuditEvent(env, {
+          eventType: "github_app.draft_dodge_closed",
+          actor: "gittensory",
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "denied",
+          detail: `${pullRequestFreshnessDetail(freshness)} — draft-dodge close not executed`,
+          metadata: {
+            deliveryId,
+            repoFullName,
+            headSha: pr.headSha,
+            blockerCodes: block.blockerCodes,
+          },
+        }).catch(() => undefined);
+      } else {
+        const codes = block.blockerCodes.join(", ");
+        await createIssueComment(
+          env,
+          installationId,
+          repoFullName,
+          pr.number,
+          `Gate verdict stands for this commit — converting to draft does not reset the review. Re-submit a new PR with the issues addressed${codes ? ` (${codes})` : ""}.`,
+        ).catch(() => undefined);
+        await closePullRequest(
+          env,
+          installationId,
+          repoFullName,
+          pr.number,
+        ).catch(() => undefined);
+        await recordAuditEvent(env, {
+          eventType: "github_app.draft_dodge_closed",
+          actor: "gittensory",
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "completed",
+          detail: `closed draft-dodge attempt by ${pr.authorLogin ?? "unknown"} — prior gate failure on headSha ${pr.headSha} stands`,
+          metadata: {
+            deliveryId,
+            repoFullName,
+            headSha: pr.headSha,
+            blockerCodes: block.blockerCodes,
+          },
+        }).catch(() => undefined);
+      }
+    } else if (draftMode === "dry_run") {
+      /* v8 ignore next -- a deleted-account PR yields a null author login; the fallback is defensive */
+      const draftAuthor = pr.authorLogin ?? "unknown";
+      await recordAuditEvent(env, {
+        eventType: "github_app.draft_dodge_closed",
+        actor: "gittensory",
+        targetKey: `${repoFullName}#${pr.number}`,
+        outcome: "completed",
+        detail: `dry-run: would close draft-dodge attempt by ${draftAuthor} — prior gate failure on headSha ${pr.headSha} stands`,
+        metadata: {
+          deliveryId,
+          repoFullName,
+          headSha: pr.headSha,
+          blockerCodes: block.blockerCodes,
+          mode: "dry_run",
+        },
+      }).catch(
+        /* v8 ignore next -- fail-safe: an audit write failure never blocks the handler */
+        () => undefined,
+      );
+    }
+  }
+}
+
+/** Outcome of {@link maybeRecloseDisallowedReopen}: "reclosed" and "lock_contended" both mean the caller must
+ *  skip the normal re-review pass — a plain boolean can't distinguish "evaluated, not blocked" from "never
+ *  evaluated, another delivery owns this PR", and conflating them let a contended pass fall through to a
+ *  concurrent re-review (#2135, review round 3). */
+type ReopenRecloseOutcome = "reclosed" | "allowed" | "lock_contended";
+
 /** Reopen-prevention (#one-shot-reopen): re-close a contributor's reopen of a PR that gittensory / a maintainer
- *  closed (closes are one-shot). Returns true when it re-closed (caller skips the re-review). Exempt: the bot's
- *  own re-review reopens, owner/admin reopens, and a contributor reopening a PR they CLOSED THEMSELVES. */
+ *  closed (closes are one-shot). Returns "reclosed" when it re-closed (caller skips the re-review). Exempt: the
+ *  bot's own re-review reopens, owner/admin reopens, and a contributor reopening a PR they CLOSED THEMSELVES.
+ *  Per-PR actuation-locked (#2135): a concurrent delivery for the same PR (e.g. a check_suite completion racing
+ *  this reopen) must not evaluate + potentially mutate this PR at the same time. Lock-contended returns
+ *  "lock_contended" — the caller skips its own re-review too, since the delivery holding the lock owns this PR. */
 async function maybeRecloseDisallowedReopen(
+  env: Env,
+  deliveryId: string,
+  installationId: number,
+  repoFullName: string,
+  pr: PullRequestRecord,
+  payload: GitHubWebhookPayload,
+): Promise<ReopenRecloseOutcome> {
+  if (!(await claimPrActuationLock(env, repoFullName, pr.number))) return "lock_contended";
+  try {
+    const reclosed = await recloseDisallowedReopenIfNeeded(
+      env,
+      deliveryId,
+      installationId,
+      repoFullName,
+      pr,
+      payload,
+    );
+    return reclosed ? "reclosed" : "allowed";
+  } finally {
+    await releasePrActuationLock(env, repoFullName, pr.number);
+  }
+}
+
+async function recloseDisallowedReopenIfNeeded(
   env: Env,
   deliveryId: string,
   installationId: number,
@@ -8016,6 +8121,7 @@ async function maybeRecloseDisallowedReopen(
     }).catch(() => undefined);
     return true; // handled (decision made); a superseded/ambiguous reopener still counts as handled
   }
+  // The comment is a courtesy notice; its failure must not mask whether the close itself succeeded (below).
   await createIssueComment(
     env,
     installationId,
@@ -8023,16 +8129,23 @@ async function maybeRecloseDisallowedReopen(
     pr.number,
     "This pull request was closed by Gittensory and can't be reopened — reviews are one-shot. Please open a new pull request with the issues resolved.",
   ).catch(() => undefined);
-  await closePullRequest(env, installationId, repoFullName, pr.number).catch(
-    () => undefined,
-  );
+  // #2260: the audit outcome must reflect whether the close actually happened on GitHub, not just whether this
+  // handler ran. A swallowed 403/404/5xx here previously still recorded outcome:"completed", so an operator
+  // trusting the audit trail believed a one-shot close was enforced when it may not have been.
+  const closeError = await closePullRequest(env, installationId, repoFullName, pr.number)
+    .then(() => null)
+    .catch((error: unknown) => error);
+  const originallyClosedBy = closer ?? "Gittensory (close beyond the inspected event window)";
   await recordAuditEvent(env, {
     eventType: "github_app.reopen_reclosed",
     actor: "gittensory",
     targetKey: `${repoFullName}#${pr.number}`,
-    outcome: "completed",
-    detail: `re-closed a disallowed reopen by ${reopener} (originally closed by ${closer ?? "Gittensory (close beyond the inspected event window)"}) — one-shot; resubmit a new PR`,
-    metadata: { deliveryId, repoFullName },
+    outcome: closeError === null ? "completed" : "error",
+    detail:
+      closeError === null
+        ? `re-closed a disallowed reopen by ${reopener} (originally closed by ${originallyClosedBy}) — one-shot; resubmit a new PR`
+        : `FAILED to re-close a disallowed reopen by ${reopener} (originally closed by ${originallyClosedBy}) — the close API call did not succeed; the PR may still be open`,
+    metadata: closeError === null ? { deliveryId, repoFullName } : { deliveryId, repoFullName, error: errorMessage(closeError) },
   }).catch(() => undefined);
   return true;
 }

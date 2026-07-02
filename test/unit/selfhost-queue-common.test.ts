@@ -4,9 +4,11 @@ import {
   buildSelfHostQueueSnapshot,
   consumingRetryDelayMs,
   deterministicJitterMs,
+  errorMessageWithCause,
   githubRateLimitAdmissionDelayMs,
   githubRateLimitAdmissionKeyScope,
   githubRateLimitAdmissionKeyForJob,
+  githubRateLimitAdmissionTargetForJob,
   githubRateLimitMetricContext,
   githubRateLimitMetricLabels,
   githubBackgroundRateLimitDelayMs,
@@ -20,6 +22,7 @@ import {
   jobPriority,
   matchesGitHubRateLimitAdmissionTarget,
   nonConsumingRetryDelayMs,
+  parsePositiveIntEnv,
   queueBackgroundConcurrency,
   queueProcessingTimeoutMs,
   queueRecoveryJitterMs,
@@ -176,6 +179,21 @@ describe("self-host queue common helpers", () => {
     expect(githubRateLimitAdmissionKeyForJob({ type: "agent-regate-pr", deliveryId: "sweep:owner/repo#1", repoFullName: "owner/repo", prNumber: 1, installationId: 123 })).toBe("installation:123");
     expect(githubRateLimitAdmissionKeyForJob({ type: "github-webhook", deliveryId: "d1", eventName: "pull_request", payload: { installation: { id: 456 } } })).toBe("installation:456");
     expect(githubRateLimitAdmissionKeyForJob({ type: "github-webhook", deliveryId: "d2", eventName: "pull_request", payload: {} })).toBeNull();
+  });
+
+  it("targets public-token admission for GitHub-budget background jobs without an installation", () => {
+    expect(githubRateLimitAdmissionTargetForJob({ type: "rag-index-repo", repoFullName: "owner/repo", requestedBy: "schedule" } as JobMessage)).toEqual({
+      kind: "background",
+      admissionKey: githubRateLimitAdmissionKeyForPublicToken(),
+    });
+    expect(githubRateLimitAdmissionTargetForJob({ type: "agent-regate-pr", deliveryId: "sweep:owner/repo#1", repoFullName: "owner/repo", prNumber: 1, installationId: 123 })).toEqual({
+      kind: "background",
+      admissionKey: "installation:123",
+    });
+    expect(githubRateLimitAdmissionTargetForJob({ type: "github-webhook", deliveryId: "d2", eventName: "pull_request", payload: {} })).toEqual({
+      kind: "webhook",
+      admissionKey: null,
+    });
   });
 
   it("computes background admission delays from persisted GitHub REST observations", () => {
@@ -1062,5 +1080,92 @@ describe("self-host queue common helpers", () => {
       if (old === undefined) delete process.env.SCHEDULED_ENQUEUE_JITTER_MS;
       else process.env.SCHEDULED_ENQUEUE_JITTER_MS = old;
     }
+  });
+
+  describe("errorMessageWithCause (#confirmed-bug: job_error/job_dead logs were undiagnosable)", () => {
+    it("returns the wrapper's own message when there is no cause", () => {
+      expect(errorMessageWithCause(new Error("Failed query: select 1"))).toBe("Failed query: select 1");
+    });
+
+    it("REGRESSION: appends the root-cause message and its error code — the exact DrizzleQueryError shape every failed query throws", () => {
+      const cause = new Error("deadlock detected");
+      (cause as { code?: string }).code = "40P01";
+      const wrapper = new Error("Failed query: insert into ...\nparams: 1,2,3", { cause });
+      expect(errorMessageWithCause(wrapper)).toBe("Failed query: insert into ...\nparams: 1,2,3 — caused by: deadlock detected [40P01]");
+    });
+
+    it("omits the code suffix when the cause has no `.code` (e.g. a plain network error)", () => {
+      const wrapper = new Error("Failed query: select 1", { cause: new Error("connection terminated unexpectedly") });
+      expect(errorMessageWithCause(wrapper)).toBe("Failed query: select 1 — caused by: connection terminated unexpectedly");
+    });
+
+    it("falls back to the wrapper's own message when `.cause` is not an Error (e.g. a string or undefined)", () => {
+      const wrapper = new Error("Failed query: select 1", { cause: "not an error object" });
+      expect(errorMessageWithCause(wrapper)).toBe("Failed query: select 1");
+    });
+
+    it("returns 'unknown error' for a non-Error thrown value", () => {
+      expect(errorMessageWithCause("a raw string throw")).toBe("unknown error");
+      expect(errorMessageWithCause(undefined)).toBe("unknown error");
+    });
+  });
+});
+
+describe("parsePositiveIntEnv", () => {
+  const KNOB = "GITTENSORY_TEST_ENV_KNOB";
+  const saved = process.env[KNOB];
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KNOB];
+    else process.env[KNOB] = saved;
+    vi.restoreAllMocks();
+  });
+
+  it("uses the fallback silently when the knob is unset", () => {
+    delete process.env[KNOB];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 1, fallback: 4 })).toBe(4);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("floors a valid in-range value", () => {
+    process.env[KNOB] = "8.9";
+    expect(parsePositiveIntEnv(KNOB, { min: 1, fallback: 4 })).toBe(8);
+  });
+
+  it("rejects a non-numeric value to the fallback with one warn line", () => {
+    process.env[KNOB] = "not-a-number";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 1, fallback: 4 })).toBe(4);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("selfhost_env_knob_rejected");
+  });
+
+  it("rejects a below-min value to the fallback with a warning", () => {
+    process.env[KNOB] = "0";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 1, fallback: 4 })).toBe(4);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("clamps an above-max value down to max with a warning", () => {
+    process.env[KNOB] = "500";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 1, max: 64, fallback: 4 })).toBe(64);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("clamps a fractional value just above max and still warns (supplied-value semantics)", () => {
+    process.env[KNOB] = "64.9";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 1, max: 64, fallback: 4 })).toBe(64);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("does not clamp when no max is configured", () => {
+    process.env[KNOB] = "5000";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveIntEnv(KNOB, { min: 0, fallback: 4 })).toBe(5000);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

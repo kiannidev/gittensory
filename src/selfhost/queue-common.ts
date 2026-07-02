@@ -373,9 +373,10 @@ export function githubRateLimitAdmissionTargetForJob(
     };
   }
   if (!isGitHubBudgetBackgroundJob(message)) return null;
+  const admissionKey = githubRateLimitAdmissionKeyForJob(message);
   return {
     kind: "background",
-    admissionKey: githubRateLimitAdmissionKeyForJob(message),
+    admissionKey: admissionKey ?? githubRateLimitAdmissionKeyForPublicToken(),
   };
 }
 
@@ -475,6 +476,23 @@ function githubWebhookPriority(payload: string): number {
   return 10;
 }
 
+/** A diagnosable message for a job failure, including the ROOT CAUSE — not just the wrapper's own text.
+ *  Drizzle's DrizzleQueryError (thrown on every failed query, both queue backends) sets its OWN `.message` to a
+ *  generic "Failed query: <sql>\nparams: <params>" and stashes the actual driver error — a Postgres SQLSTATE
+ *  deadlock/serialization failure, a SQLite busy/constraint code, a connection reset, etc. — on `.cause`.
+ *  Logging only `error.message` for a query failure is undiagnosable: every failure looks identical (the same
+ *  query + params) regardless of the actual reason, which is exactly the information needed to tell a transient
+ *  lock/connection blip apart from a genuine data or schema bug. Includes the cause's `.code` (Postgres SQLSTATE
+ *  / SQLite result code) when present, since that is the canonical, greppable identifier for the failure class. */
+export function errorMessageWithCause(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown error";
+  const cause = error.cause;
+  if (!(cause instanceof Error)) return error.message;
+  const code = (cause as { code?: unknown }).code;
+  const codeSuffix = typeof code === "string" && code.length > 0 ? ` [${code}]` : "";
+  return `${error.message} — caused by: ${cause.message}${codeSuffix}`;
+}
+
 const DEFAULT_GITHUB_RATE_LIMIT_RETRY_MS = 5 * 60_000;
 const MAX_GITHUB_RATE_LIMIT_RETRY_MS = 65 * 60_000;
 
@@ -547,8 +565,7 @@ export function queueProcessingTimeoutMs(): number {
 }
 
 export function queueStartupJitterMinJobs(): number {
-  const raw = Number(process.env.QUEUE_STARTUP_JITTER_MIN_JOBS ?? DEFAULT_STARTUP_JITTER_MIN_JOBS);
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_STARTUP_JITTER_MIN_JOBS;
+  return parsePositiveIntEnv("QUEUE_STARTUP_JITTER_MIN_JOBS", { min: 0, fallback: DEFAULT_STARTUP_JITTER_MIN_JOBS });
 }
 
 export function deterministicJitterMs(seed: string, maxJitterMs: number): number {
@@ -788,9 +805,38 @@ function queueRateLimitJitterMs(): number {
   return envDurationMs("QUEUE_RATE_LIMIT_JITTER_MS", DEFAULT_RATE_LIMIT_JITTER_MS);
 }
 
+function warnEnvKnobRejected(knob: string, supplied: string, using: number): void {
+  console.warn(JSON.stringify({ level: "warn", event: "selfhost_env_knob_rejected", knob, supplied, using }));
+}
+
+/**
+ * Parse a positive-integer env tuning knob with bounds and a fallback, emitting one structured warn line when a
+ * supplied value is rejected so a misconfiguration is visible instead of silently becoming a surprising default.
+ *
+ * - A missing value uses `fallback` silently (an unset knob is not a misconfiguration).
+ * - A non-finite value (e.g. `NaN`), or a value below `min`, is rejected to `fallback` with a warning.
+ * - A value above `max` (when provided) is clamped down to `max` with a warning.
+ * - Otherwise the value is floored to an integer.
+ */
+export function parsePositiveIntEnv(name: string, opts: { min: number; max?: number; fallback: number }): number {
+  const supplied = process.env[name];
+  if (supplied === undefined) return opts.fallback;
+  const parsed = Number(supplied);
+  if (!Number.isFinite(parsed) || parsed < opts.min) {
+    warnEnvKnobRejected(name, supplied, opts.fallback);
+    return opts.fallback;
+  }
+  // Compare the SUPPLIED value (not the floored one) against max, so a fractional value just above the cap
+  // (e.g. 64.9 with max 64) is reported as clamped rather than silently floored back into range.
+  if (opts.max !== undefined && parsed > opts.max) {
+    warnEnvKnobRejected(name, supplied, opts.max);
+    return opts.max;
+  }
+  return Math.floor(parsed);
+}
+
 function envDurationMs(name: string, fallback: number): number {
-  const raw = Number(process.env[name] ?? fallback);
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : fallback;
+  return parsePositiveIntEnv(name, { min: 0, fallback });
 }
 
 function normalizedRepo(value: unknown): string | null {
