@@ -422,7 +422,7 @@ function categorizeFile(path: string): FileCategory {
   ) {
     return { path, extension, category: "lockfile" };
   }
-  if (path.startsWith(".github/workflows/")) {
+  if (/^\.github\/workflows\//i.test(path.replace(/\\/g, "/"))) {
     return { path, extension, category: "workflow" };
   }
   if (
