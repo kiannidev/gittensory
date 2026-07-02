@@ -1,11 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearGitHubResponseCacheForTest, githubRateLimitAdmissionKeyForInstallation, latestGitHubRestRateLimitObservation } from "../../src/github/client";
-import { getPreviewBuildState } from "../../src/review/visual/preview-url";
+import { getPreviewBuildState, parseRepo } from "../../src/review/visual/preview-url";
 
 afterEach(() => {
   clearGitHubResponseCacheForTest();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe("parseRepo", () => {
+  it("parses owner/repo and rejects malformed input", () => {
+    expect(parseRepo(" JSONbored/gittensory ")).toEqual({ owner: "JSONbored", repo: "gittensory" });
+    expect(() => parseRepo("not-a-repo")).toThrow("Expected owner/repo repository name.");
+    expect(() => parseRepo("too/many/slashes")).toThrow("Expected owner/repo repository name.");
+    expect(() => parseRepo("/missing-owner")).toThrow("Expected owner/repo repository name.");
+  });
 });
 
 describe("preview-url GitHub reads", () => {
