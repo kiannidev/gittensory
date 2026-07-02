@@ -5,7 +5,7 @@ import { createInstallationToken, githubErrorStatus, isGitHubRateLimitedError } 
 import { fetchLiveCiAggregate, refreshInstallationHealthForInstallation } from "../github/backfill";
 import { githubRateLimitAdmissionKeyForToken } from "../github/client";
 import { ensurePullRequestLabel, removePullRequestLabel } from "../github/labels";
-import { closePullRequest, createIssueComment, createPullRequestReview, dismissLatestBotApproval, mergePullRequest, updatePullRequestBranch } from "../github/pr-actions";
+import { closeIssue, closePullRequest, createIssueComment, createPullRequestReview, dismissLatestBotApproval, mergePullRequest, updatePullRequestBranch } from "../github/pr-actions";
 import { fetchPullRequestFreshness, pullRequestFreshnessDetail } from "../github/pr-freshness";
 import { isActingAutonomyLevel, resolveAutonomy } from "../settings/autonomy";
 import { buildAgentActionAudit, isGlobalAgentPause, resolveAgentActionMode, resolveAgentPermissionReadiness } from "../settings/agent-execution";
@@ -129,15 +129,22 @@ export async function executeAgentMaintenanceActions(env: Env, ctx: AgentActionE
       await audit("denied", `${pullRequestFreshnessDetail(freshness)} — action not executed`);
       continue;
     }
-    // 6) Live CI re-verification for a merge or a heuristic close (#2128): the CI aggregate that drove either
-    //    decision was read seconds-to-tens-of-seconds earlier, in the planning pass, and the freshness guard
-    //    above only re-checks head SHA/state, not CI. GitHub's own merge endpoint enforces branch-protection
-    //    REQUIRED checks server-side, but only as a backstop when a repo actually configures them; a heuristic
-    //    close has no server-side check at all. Re-read live CI right before the mutation so a check that
-    //    flipped in this narrow window is never acted on from stale information. Deterministic closes
-    //    (linked-issue hard-rule, blacklist) are exempt — they are zero-hallucination facts that do not depend
-    //    on CI, and the linked-issue rule already has its own flag-then-verify pass.
-    if (action.actionClass === "merge" || (action.actionClass === "close" && action.closeKind === "heuristic")) {
+    // 6) Live CI re-verification for a merge or a CI-driven heuristic close (#2128): the CI aggregate that drove
+    //    either decision was read seconds-to-tens-of-seconds earlier, in the planning pass, and the freshness
+    //    guard above only re-checks head SHA/state, not CI. GitHub's own merge endpoint enforces
+    //    branch-protection REQUIRED checks server-side, but only as a backstop when a repo actually configures
+    //    them; a red-CI close has no server-side check at all. Re-read live CI right before the mutation so a
+    //    check that flipped in this narrow window is never acted on from stale information. Non-CI closes
+    //    (gate verdict, duplicate/slop, conflict, linked-issue hard-rule, blacklist) are exempt — their adverse
+    //    signal does not depend on CI still being red.
+    //    A heuristic close staged BEFORE #2478 has no closeRequiresCiState at all -- that field didn't exist yet
+    //    -- so `undefined` here is genuinely ambiguous (a legacy CI-driven close and a legacy non-CI close are
+    //    byte-identical in storage). The planner now ALWAYS sets the field going forward (never omits it), so
+    //    `undefined` can only mean a legacy row; treat it with the old, broader pre-#2478 guard (require CI still
+    //    failed) rather than skipping the recheck, which would let a stale CI-driven close silently execute
+    //    after CI recovers (flagged by the gate's own review of #2478).
+    const isAmbiguousLegacyHeuristicClose = action.actionClass === "close" && action.closeKind === "heuristic" && action.closeRequiresCiState === undefined;
+    if (action.actionClass === "merge" || (action.actionClass === "close" && action.closeRequiresCiState === "failed") || isAmbiguousLegacyHeuristicClose) {
       const ciToken = await createInstallationToken(env, ctx.installationId).catch(() => undefined);
       const admissionKey = githubRateLimitAdmissionKeyForToken(env, ciToken, ctx.installationId);
       const liveCi = await fetchLiveCiAggregate(env, ctx.repoFullName, expectedHeadSha, ciToken, undefined, admissionKey);
@@ -151,7 +158,9 @@ export async function executeAgentMaintenanceActions(env: Env, ctx: AgentActionE
           ? liveCi.ciState !== "passed"
             ? `live CI is no longer passing (now: ${liveCi.ciState})`
             : null
-          : liveCi.ciState !== "failed"
+          // isAmbiguousLegacyHeuristicClose falls back to "failed" (the old unconditional requirement); an
+          // explicitly-tagged fresh close compares against its own recorded requirement.
+          : liveCi.ciState !== (action.closeRequiresCiState ?? "failed")
             ? `CI state changed since planning (now: ${liveCi.ciState})`
             : null;
       if (staleReason) {
@@ -200,6 +209,83 @@ export async function executeAgentMaintenanceActions(env: Env, ctx: AgentActionE
       if (PR_WRITE_CLASSES.has(action.actionClass) && shouldRefreshInstallationHealthAfterPrWriteFailure(ctx.installationId, error)) {
         await refreshInstallationHealthForInstallation(env, ctx.installationId).catch(() => undefined);
       }
+    }
+  }
+
+  return outcomes;
+}
+
+export type IssueActionExecutionContext = {
+  installationId: number;
+  repoFullName: string;
+  issueNumber: number;
+  autonomy: AutonomyPolicy | null | undefined;
+  agentPaused?: boolean | undefined;
+  agentDryRun?: boolean | undefined;
+};
+
+/**
+ * Execute (or dry-run) a planned label/close action set on an ISSUE — #2270's first issue-side actuation
+ * (`planAgentMaintenanceActions`'s `contributor_cap` short-circuit is currently the only source of an
+ * issue-targeted plan). Deliberately NARROWER than {@link executeAgentMaintenanceActions}:
+ *   - Only `label` (add) and `close` are handled — the only classes the contributor_cap short-circuit ever
+ *     produces. Any other class is denied defensively rather than mis-executed against an issue.
+ *   - No freshness/live-CI-re-verification/pull_requests:write gate: none of those PR concepts apply to a
+ *     plain issue (no head SHA, no CI, and a close needs `issues: write`, a different permission than the PR
+ *     executor's write-readiness check covers).
+ *   - `requiresApproval` (`auto_with_approval`) is DENIED, not staged: the pending-action queue is PR-shaped
+ *     (pullNumber-typed staging + a `/pull/{n}` notification deeplink); extending it to issues is out of scope
+ *     here. Denying — rather than silently executing or silently skipping the approval gate — keeps the
+ *     configured autonomy honest: an operator who set `auto_with_approval` never gets an un-approved action.
+ */
+export async function executeIssueMaintenanceActions(env: Env, ctx: IssueActionExecutionContext, planned: PlannedAgentAction[]): Promise<AgentActionOutcome[]> {
+  const outcomes: AgentActionOutcome[] = [];
+  const targetKey = `${ctx.repoFullName}#${ctx.issueNumber}`;
+  const mode = resolveAgentActionMode({ globalPaused: isGlobalAgentPause(env) || (await isGlobalAgentFrozen(env)), agentPaused: ctx.agentPaused, agentDryRun: ctx.agentDryRun });
+
+  for (const action of planned) {
+    const autonomyLevel = resolveAutonomy(ctx.autonomy, action.actionClass);
+    const audit = (outcome: AgentActionOutcome["outcome"], detail: string) => {
+      const auditOutcome = outcome === "dry_run" ? "completed" : outcome;
+      outcomes.push({ actionClass: action.actionClass, outcome, detail });
+      return recordAuditEvent(
+        env,
+        buildAgentActionAudit({ actionClass: action.actionClass, autonomyLevel, mode, outcome: auditOutcome, repoFullName: ctx.repoFullName, targetKey, actor: AGENT_ACTOR, reason: detail }),
+      );
+    };
+
+    if (mode === "paused") {
+      await audit("denied", "agent actions paused");
+      continue;
+    }
+    if (!isActingAutonomyLevel(autonomyLevel)) {
+      await audit("denied", `autonomy for ${action.actionClass} is ${autonomyLevel} — action not currently enabled`);
+      continue;
+    }
+    if (mode === "dry_run") {
+      await audit("dry_run", `dry-run: would ${action.actionClass} — ${action.reason}`);
+      continue;
+    }
+    if (action.requiresApproval) {
+      await audit("denied", `awaiting maintainer approval — issue-side staging is not yet supported (${action.reason})`);
+      continue;
+    }
+    if (action.actionClass !== "label" && action.actionClass !== "close") {
+      /* v8 ignore next -- defensive: planAgentMaintenanceActions's contributor_cap short-circuit (this
+       * executor's only caller today) never produces any class besides label/close. */
+      await audit("denied", `unsupported action class for an issue: ${action.actionClass}`);
+      continue;
+    }
+    try {
+      if (action.actionClass === "label") {
+        await ensurePullRequestLabel(env, ctx.installationId, ctx.repoFullName, ctx.issueNumber, action.label ?? "", { createMissingLabel: true });
+      } else {
+        if (action.closeComment) await createIssueComment(env, ctx.installationId, ctx.repoFullName, ctx.issueNumber, action.closeComment);
+        await closeIssue(env, ctx.installationId, ctx.repoFullName, ctx.issueNumber);
+      }
+      await audit("completed", action.reason);
+    } catch (error) {
+      await audit("error", errorMessage(error));
     }
   }
 
@@ -317,10 +403,11 @@ export function actionParams(action: PlannedAgentAction): AgentPendingActionPara
     ...(action.dismissStaleApproval !== undefined ? { dismissStaleApproval: action.dismissStaleApproval } : {}),
     // Round-trip closeKind so a staged close's kind survives to accept-time — without it, the close-precision
     // breaker's isHeuristicClose check (which matches on closeKind === "heuristic") could never fire for any
-    // staged close, silently defeating the breaker for the entire approval-queue accept path (#2127), and the
-    // actuation-time live-CI re-check above (#2364) — which only applies to a heuristic close — would be
-    // silently skipped for a lost discriminator.
+    // staged close, silently defeating the breaker for the entire approval-queue accept path (#2127).
     ...(action.closeKind !== undefined ? { closeKind: action.closeKind } : {}),
+    // Round-trip the CI dependency separately from closeKind: closeKind is intentionally broad (gate-verdict /
+    // duplicate / slop / CI) for the close-precision breaker, but only red-CI closes need the live-CI guard.
+    ...(action.closeRequiresCiState !== undefined ? { closeRequiresCiState: action.closeRequiresCiState } : {}),
   };
 }
 

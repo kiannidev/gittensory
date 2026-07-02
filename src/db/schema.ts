@@ -91,6 +91,7 @@ export const repositorySettings = sqliteTable("repository_settings", {
   // Per-contributor open PR/issue caps (#2270, anti-abuse): null = no cap (default). Enforcement lands separately.
   contributorOpenPrCap: integer("contributor_open_pr_cap"),
   contributorOpenIssueCap: integer("contributor_open_issue_cap"),
+  contributorCapLabel: text("contributor_cap_label").notNull().default("over-contributor-limit"),
   createdAt: text("created_at").notNull().$defaultFn(() => nowIso()),
   updatedAt: text("updated_at").notNull().$defaultFn(() => nowIso()),
 });
@@ -215,6 +216,9 @@ export const pullRequestDetailSyncState = sqliteTable(
     repoFullName: text("repo_full_name").notNull(),
     pullNumber: integer("pull_number").notNull(),
     status: text("status").notNull().default("never_synced"),
+    // The head SHA the FILES were last synced for (not the review/checks SHA) — lets a caller skip a
+    // `/pulls/{n}/files` refetch when the PR's current head still matches what is already stored (#audit-rate-headroom).
+    headSha: text("head_sha"),
     filesSyncedAt: text("files_synced_at"),
     reviewsSyncedAt: text("reviews_synced_at"),
     checksSyncedAt: text("checks_synced_at"),

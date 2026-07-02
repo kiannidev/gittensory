@@ -621,6 +621,11 @@ export type RepositorySettings = {
   /** Per-contributor open-issue cap (#2270, anti-abuse): same shape and precedence as {@link contributorOpenPrCap},
    *  applied to open issues instead of open PRs. `null`/absent (default) = no cap. */
   contributorOpenIssueCap?: number | null | undefined;
+  /** The label applied to a PR/issue closed for exceeding a per-contributor open-item cap (#2270). Same
+   *  configurable-with-fallback shape as {@link blacklistLabel}; defaults to `"over-contributor-limit"` so the
+   *  disposition works regardless of the label a repo sets. Always populated by the DB layer; optional so
+   *  existing settings fixtures/callers need not be touched. */
+  contributorCapLabel?: string | undefined;
   /** Agent-layer autonomy dial (#773): per-action-class level. Always populated by the DB layer (default
    *  `{}` = deny-by-default = "observe" for every class); optional so existing settings fixtures/callers
    *  need not be touched. The single source the action layer (#778) reads via `resolveAutonomy`. */
@@ -696,7 +701,12 @@ export type AgentPendingActionParams = {
   // (#2127), and the actuation-time live-CI re-check (#2364) — which only applies to a heuristic close — still
   // fires correctly once the row is replayed through pendingActionToPlanned, rather than silently skipping for
   // a lost discriminator.
-  closeKind?: "linked-issue-hard-rule" | "blacklist" | "heuristic";
+  closeKind?: "linked-issue-hard-rule" | "blacklist" | "contributor_cap" | "heuristic";
+  // For a CI-driven heuristic close, persist the CI state that must still hold when the staged action replays
+  // (#2364). This is separate from closeKind because heuristic closes also cover non-CI adverse signals.
+  // ALWAYS set (to "failed" or "not_required") for a freshly planned heuristic close (#2478) -- never omitted --
+  // so `undefined` unambiguously means a LEGACY row staged before this field existed, not "not CI-driven".
+  closeRequiresCiState?: "failed" | "not_required";
   expectedHeadSha?: string;
   // For an `approve` action: retract the bot's own stale approval instead of posting a new one (see
   // PlannedAgentAction.dismissStaleApproval). Must round-trip through staging like every other action-specific
@@ -817,6 +827,7 @@ export type PullRequestDetailSyncStateRecord = {
   repoFullName: string;
   pullNumber: number;
   status: "never_synced" | "running" | "complete" | "partial" | "waiting_rate_limit" | "error";
+  headSha?: string | null | undefined;
   filesSyncedAt?: string | null | undefined;
   reviewsSyncedAt?: string | null | undefined;
   checksSyncedAt?: string | null | undefined;

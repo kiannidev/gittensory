@@ -4,6 +4,7 @@ vi.mock("../../src/github/pr-actions", () => ({
   createPullRequestReview: vi.fn(async () => ({ id: 1 })),
   mergePullRequest: vi.fn(async () => ({ merged: true, sha: "merged-sha" })),
   closePullRequest: vi.fn(async () => ({ state: "closed" })),
+  closeIssue: vi.fn(async () => ({ state: "closed" })),
   createIssueComment: vi.fn(async () => ({ id: 2 })),
   updatePullRequestBranch: vi.fn(async () => undefined),
   dismissLatestBotApproval: vi.fn(async () => ({ dismissed: true })),
@@ -35,12 +36,21 @@ vi.mock("../../src/github/backfill", async (importOriginal) => ({
   refreshInstallationHealthForInstallation: vi.fn(async () => null),
 }));
 
-import { closePullRequest, createIssueComment, createPullRequestReview, dismissLatestBotApproval, mergePullRequest, updatePullRequestBranch } from "../../src/github/pr-actions";
+import { closeIssue, closePullRequest, createIssueComment, createPullRequestReview, dismissLatestBotApproval, mergePullRequest, updatePullRequestBranch } from "../../src/github/pr-actions";
 import { ensurePullRequestLabel, removePullRequestLabel } from "../../src/github/labels";
 import { fetchPullRequestFreshness } from "../../src/github/pr-freshness";
 import { createInstallationToken } from "../../src/github/app";
 import { fetchLiveCiAggregate, refreshInstallationHealthForInstallation } from "../../src/github/backfill";
-import { actionParams, executeAgentMaintenanceActions, pendingActionToPlanned, pendingClosureLabelApplied, type AgentActionExecutionContext, type AgentActionOutcome } from "../../src/services/agent-action-executor";
+import {
+  actionParams,
+  executeAgentMaintenanceActions,
+  executeIssueMaintenanceActions,
+  pendingActionToPlanned,
+  pendingClosureLabelApplied,
+  type AgentActionExecutionContext,
+  type AgentActionOutcome,
+  type IssueActionExecutionContext,
+} from "../../src/services/agent-action-executor";
 import type { PlannedAgentAction } from "../../src/settings/agent-actions";
 import { AGENT_LABEL_PENDING_CLOSURE } from "../../src/review/linked-issue-hard-rules";
 import { isGlobalAgentFrozen, setGlobalAgentFrozen, upsertPullRequestFromGitHub } from "../../src/db/repositories";
@@ -197,7 +207,7 @@ describe("executeAgentMaintenanceActions (#778 gate stack)", () => {
 
   it("LIVE heuristic close is denied when live CI has since turned green (#2128)", async () => {
     const env = createTestEnv({});
-    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic" };
+    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic", closeRequiresCiState: "failed" };
     vi.mocked(fetchLiveCiAggregate).mockResolvedValueOnce({ ciState: "passed", hasPending: false, hasVisiblePending: false, failingDetails: [], nonRequiredFailingDetails: [], ciCompletenessWarning: null });
     const outcomes = await executeAgentMaintenanceActions(env, ctx(), [heuristicClose]);
     expect(outcomes[0]?.outcome).toBe("denied");
@@ -207,7 +217,7 @@ describe("executeAgentMaintenanceActions (#778 gate stack)", () => {
 
   it("LIVE heuristic close proceeds when live CI is still failing (#2128)", async () => {
     const env = createTestEnv({});
-    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic" };
+    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic", closeRequiresCiState: "failed" };
     vi.mocked(fetchLiveCiAggregate).mockResolvedValueOnce({ ciState: "failed", hasPending: false, hasVisiblePending: false, failingDetails: [], nonRequiredFailingDetails: [], ciCompletenessWarning: null });
     const outcomes = await executeAgentMaintenanceActions(env, ctx(), [heuristicClose]);
     expect(outcomes[0]?.outcome).toBe("completed");
@@ -216,18 +226,52 @@ describe("executeAgentMaintenanceActions (#778 gate stack)", () => {
 
   it("REGRESSION (#2364): a queued heuristic close still re-checks live CI after the approval-queue replay round trip", async () => {
     const env = createTestEnv({});
-    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic" };
+    const heuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic", closeRequiresCiState: "failed" };
     // Simulate the persist/replay path: stageForApproval calls actionParams() to persist the row, and accept
-    // rebuilds it via pendingActionToPlanned(). Without persisting closeKind, the rebuilt action would lose the
-    // discriminator the live-CI re-check keys on, silently skipping it for every accepted queued heuristic close.
+    // rebuilds it via pendingActionToPlanned(). Persist both the broad close kind and the narrower CI
+    // dependency so queued red-CI closes still get the live-CI re-check without applying it to every heuristic close.
     const persisted = actionParams(heuristicClose);
     const replayed = pendingActionToPlanned({ actionClass: "close", params: persisted, reason: heuristicClose.reason });
     expect(replayed.closeKind).toBe("heuristic");
+    expect(replayed.closeRequiresCiState).toBe("failed");
     vi.mocked(fetchLiveCiAggregate).mockResolvedValueOnce({ ciState: "passed", hasPending: false, hasVisiblePending: false, failingDetails: [], nonRequiredFailingDetails: [], ciCompletenessWarning: null });
     const outcomes = await executeAgentMaintenanceActions(env, ctx(), [replayed]);
     expect(outcomes[0]?.outcome).toBe("denied");
     expect(outcomes[0]?.detail).toContain("CI state changed since planning (now: passed)");
     expect(closePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("LIVE non-CI heuristic close proceeds when live CI is passing because the close reason is independent of CI", async () => {
+    const env = createTestEnv({});
+    // "not_required", not omitted: the planner always tags a fresh heuristic close explicitly (#2478).
+    const gateClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "policy gate blocker", closeComment: "closing", closeKind: "heuristic", closeRequiresCiState: "not_required" };
+    const outcomes = await executeAgentMaintenanceActions(env, ctx(), [gateClose]);
+    expect(outcomes[0]?.outcome).toBe("completed");
+    expect(closePullRequest).toHaveBeenCalledWith(env, 123, "owner/repo", 7);
+    expect(fetchLiveCiAggregate).not.toHaveBeenCalled();
+  });
+
+  it("REGRESSION (#2478, flagged by the gate's own review of #2478): a LEGACY heuristic close staged before closeRequiresCiState existed (closeKind heuristic, field entirely absent) still re-checks live CI and is DENIED once CI has turned green", async () => {
+    // Simulates a pending_agent_actions row persisted by code that predates #2478 -- closeKind: "heuristic" with
+    // no closeRequiresCiState key at all, since the field didn't exist yet. The fix must NOT silently skip the
+    // live-CI recheck for this row just because the new "not_required" tag is absent, or a stale CI-driven close
+    // could execute after CI recovers.
+    const env = createTestEnv({});
+    const legacyHeuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic" };
+    vi.mocked(fetchLiveCiAggregate).mockResolvedValueOnce({ ciState: "passed", hasPending: false, hasVisiblePending: false, failingDetails: [], nonRequiredFailingDetails: [], ciCompletenessWarning: null });
+    const outcomes = await executeAgentMaintenanceActions(env, ctx(), [legacyHeuristicClose]);
+    expect(outcomes[0]?.outcome).toBe("denied");
+    expect(outcomes[0]?.detail).toContain("CI state changed since planning (now: passed)");
+    expect(closePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("a LEGACY heuristic close (closeRequiresCiState absent) still proceeds when live CI is genuinely still failing, matching the old pre-#2478 behavior", async () => {
+    const env = createTestEnv({});
+    const legacyHeuristicClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "CI failed", closeComment: "closing", closeKind: "heuristic" };
+    vi.mocked(fetchLiveCiAggregate).mockResolvedValueOnce({ ciState: "failed", hasPending: false, hasVisiblePending: false, failingDetails: [], nonRequiredFailingDetails: [], ciCompletenessWarning: null });
+    const outcomes = await executeAgentMaintenanceActions(env, ctx(), [legacyHeuristicClose]);
+    expect(outcomes[0]?.outcome).toBe("completed");
+    expect(closePullRequest).toHaveBeenCalledWith(env, 123, "owner/repo", 7);
   });
 
   it("LIVE non-heuristic close (linked-issue hard-rule) skips the live CI re-check entirely (#2128)", async () => {
@@ -557,6 +601,119 @@ describe("executeAgentMaintenanceActions (#778 gate stack)", () => {
     const outcomes = await executeAgentMaintenanceActions(env, ctx({ installationId: 126 }), [close]);
     expect(outcomes[0]?.outcome).toBe("error");
     expect(refreshInstallationHealthForInstallation).toHaveBeenCalledWith(env, 126);
+    expect((await auditFor(env, "close"))?.outcome).toBe("error");
+  });
+});
+
+function issueCtx(over: Partial<IssueActionExecutionContext> = {}): IssueActionExecutionContext {
+  return {
+    installationId: 123,
+    repoFullName: "owner/repo",
+    issueNumber: 42,
+    autonomy: { label: "auto", close: "auto" },
+    agentPaused: false,
+    agentDryRun: false,
+    ...over,
+  };
+}
+
+const issueLabel: PlannedAgentAction = { actionClass: "label", requiresApproval: false, reason: "over the per-contributor open-item cap", label: "over-contributor-limit", labelOp: "add" };
+const issueClose: PlannedAgentAction = { actionClass: "close", requiresApproval: false, reason: "over the per-contributor open-item cap", closeComment: "closing this issue", closeKind: "contributor_cap" };
+
+describe("executeIssueMaintenanceActions (#2270 issue-side actuation)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("LIVE: labels + closes an issue via the issues-endpoint primitives and audits completed", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx(), [issueLabel, issueClose]);
+    expect(outcomes.map((o) => o.outcome)).toEqual(["completed", "completed"]);
+    expect(ensurePullRequestLabel).toHaveBeenCalledWith(env, 123, "owner/repo", 42, "over-contributor-limit", { createMissingLabel: true });
+    expect(createIssueComment).toHaveBeenCalledWith(env, 123, "owner/repo", 42, "closing this issue");
+    expect(closeIssue).toHaveBeenCalledWith(env, 123, "owner/repo", 42);
+    expect(closePullRequest).not.toHaveBeenCalled(); // the PR endpoint must never be hit for an issue number
+    expect((await auditFor(env, "close"))?.outcome).toBe("completed");
+  });
+
+  it("a close with no closeComment posts no comment (defensive — the contributor_cap planner always sets one)", async () => {
+    const env = createTestEnv({});
+    const { closeComment: _closeComment, ...closeWithoutComment } = issueClose;
+    await executeIssueMaintenanceActions(env, issueCtx(), [closeWithoutComment]);
+    expect(createIssueComment).not.toHaveBeenCalled();
+    expect(closeIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("a label action with no label name falls back to an empty string (defensive — the contributor_cap planner always sets one)", async () => {
+    const env = createTestEnv({});
+    const { label: _label, ...labelWithoutName } = issueLabel;
+    await executeIssueMaintenanceActions(env, issueCtx(), [labelWithoutName]);
+    expect(ensurePullRequestLabel).toHaveBeenCalledWith(env, 123, "owner/repo", 42, "", { createMissingLabel: true });
+  });
+
+  it("PAUSED (per-repo): mutates nothing and audits denied", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ agentPaused: true }), [issueLabel, issueClose]);
+    expect(outcomes.every((o) => o.outcome === "denied")).toBe(true);
+    expect(ensurePullRequestLabel).not.toHaveBeenCalled();
+    expect(closeIssue).not.toHaveBeenCalled();
+    expect(JSON.parse((await auditFor(env, "close"))?.metadata_json ?? "{}")).toMatchObject({ mode: "paused" });
+  });
+
+  it("GLOBAL kill-switch halts everything regardless of per-repo config", async () => {
+    const env = createTestEnv({ AGENT_ACTIONS_PAUSED: "true" });
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ agentPaused: false }), [issueClose]);
+    expect(outcomes[0]?.outcome).toBe("denied");
+    expect(closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("denies when current per-action autonomy is no longer acting", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ autonomy: { label: "observe", close: "observe" } }), [issueLabel, issueClose]);
+    expect(outcomes.map((o) => o.outcome)).toEqual(["denied", "denied"]);
+    expect(ensurePullRequestLabel).not.toHaveBeenCalled();
+    expect(closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("DRY-RUN: records the intent without any GitHub call, audited with mode=dry_run", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ agentDryRun: true }), [issueLabel, issueClose]);
+    expect(outcomes.map((o) => o.outcome)).toEqual(["dry_run", "dry_run"]);
+    expect(ensurePullRequestLabel).not.toHaveBeenCalled();
+    expect(closeIssue).not.toHaveBeenCalled();
+    const audit = await auditFor(env, "close");
+    expect(audit?.outcome).toBe("completed");
+    expect(JSON.parse(audit?.metadata_json ?? "{}")).toMatchObject({ mode: "dry_run" });
+  });
+
+  it("auto_with_approval is DENIED, not staged — issue-side staging is not implemented (#2270 known scope limit)", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ autonomy: { label: "auto_with_approval", close: "auto_with_approval" } }), [
+      { ...issueLabel, requiresApproval: true },
+      { ...issueClose, requiresApproval: true },
+    ]);
+    expect(outcomes.map((o) => o.outcome)).toEqual(["denied", "denied"]);
+    expect(ensurePullRequestLabel).not.toHaveBeenCalled();
+    expect(closeIssue).not.toHaveBeenCalled();
+    const detail = await env.DB.prepare("select detail from audit_events where event_type = 'agent.action.close' order by created_at desc limit 1").first<{ detail: string }>();
+    expect(detail?.detail).toMatch(/issue-side staging is not yet supported/);
+  });
+
+  it("denies an unsupported action class defensively (this executor only handles label/close)", async () => {
+    const env = createTestEnv({});
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx({ autonomy: { merge: "auto" } }), [
+      { actionClass: "merge", requiresApproval: false, reason: "n/a", mergeMethod: "squash" },
+    ]);
+    expect(outcomes[0]?.outcome).toBe("denied");
+    const detail = await env.DB.prepare("select detail from audit_events where event_type = 'agent.action.merge' order by created_at desc limit 1").first<{ detail: string }>();
+    expect(detail?.detail).toMatch(/unsupported action class for an issue/);
+  });
+
+  it("records a failed mutation as error rather than swallowing it", async () => {
+    const env = createTestEnv({});
+    vi.mocked(closeIssue).mockRejectedValueOnce(new Error("github 500"));
+    const outcomes = await executeIssueMaintenanceActions(env, issueCtx(), [issueClose]);
+    expect(outcomes[0]?.outcome).toBe("error");
     expect((await auditFor(env, "close"))?.outcome).toBe("error");
   });
 });
