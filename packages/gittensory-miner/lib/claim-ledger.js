@@ -81,6 +81,14 @@ export function openClaimLedger(dbPath = resolveClaimLedgerDbPath()) {
   // LOCAL bookkeeping only: this table records which issues this miner instance has soft-claimed on this
   // machine. It does NOT adjudicate contested duplicates — sibling miners claiming the same issue are
   // resolved elsewhere via `isDuplicateClusterWinnerByClaim` from `@jsonbored/gittensory-engine` (#3355).
+  //
+  // miner_claims schema (#3352):
+  //   repo_full_name TEXT NOT NULL,
+  //   issue_number   INTEGER NOT NULL,
+  //   claimed_at     TEXT NOT NULL,
+  //   status         TEXT NOT NULL CHECK(status IN ('active','released','expired')),
+  //   UNIQUE (repo_full_name, issue_number) — one row per claimed issue (id is the surrogate primary key).
+  // Release/expire moments are recorded via status transitions, not a separate released_at column.
   db.exec(`
     CREATE TABLE IF NOT EXISTS miner_claims (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
