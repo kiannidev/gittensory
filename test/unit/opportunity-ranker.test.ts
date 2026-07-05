@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rankOpportunityScore, rankOpportunities, pickTopRankedOpportunities } from "../../packages/gittensory-engine/src/opportunity-ranker";
+import { pickTopRankedOpportunities, rankOpportunities, rankOpportunityScore, type OpportunityRankInput } from "../../packages/gittensory-engine/src/opportunity-ranker";
 
 // A neutral, all-passing candidate (every factor 1, no contention → score 1); tests override one field at a time.
 function input(over: Partial<OpportunityRankInput> = {}): OpportunityRankInput {
