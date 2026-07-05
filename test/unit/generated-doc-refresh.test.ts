@@ -42,6 +42,34 @@ describe("refreshGeneratedDoc (#3004)", () => {
     expect(result).toEqual({ action: "replace", content: SECTION_V2 });
   });
 
+  it("replaces generated frontmatter together with a later marker block", () => {
+    const withFrontmatter = `---\nname: widgets\n---\n\n${SECTION}`;
+    const withUpdatedFrontmatter = `---\nname: updated-widgets\n---\n\n${SECTION_V2}`;
+    expect(refreshGeneratedDoc(withFrontmatter, withFrontmatter, MARKERS)).toEqual({ action: "no-change" });
+    // The fresh frontmatter GROWS here ("widgets" -> "updated-widgets") -- covered separately below for the
+    // SHRINKS direction, which used to corrupt the file (#skill-frontmatter-shrink-regression).
+    expect(refreshGeneratedDoc(withFrontmatter, withUpdatedFrontmatter, MARKERS)).toEqual({ action: "replace", content: withUpdatedFrontmatter });
+  });
+
+  it("REGRESSION: replaces the full old frontmatter even when the fresh frontmatter is SHORTER, never leaving a truncated fragment (#skill-frontmatter-shrink-regression)", () => {
+    // The inverse of the growing case above: the file currently has the LONGER frontmatter (e.g. before a repo
+    // rename shortened repoSkillName), and refresh renders the SHORTER one. Replacing purely by walking back
+    // `generatedStartIndex` bytes from the marker's current position would land inside the old frontmatter
+    // instead of at byte 0, leaving a garbled fragment of it ahead of the fresh content.
+    const withLongerFrontmatter = `---\nname: updated-widgets\n---\n\n${SECTION}`;
+    const withShorterFrontmatter = `---\nname: widgets\n---\n\n${SECTION_V2}`;
+    const result = refreshGeneratedDoc(withLongerFrontmatter, withShorterFrontmatter, MARKERS);
+    expect(result).toEqual({ action: "replace", content: withShorterFrontmatter });
+    // Defense in depth: no fragment of the old, longer frontmatter survives anywhere in the output.
+    expect((result as { content: string }).content).not.toContain("updated-widgets");
+  });
+
+  it("fails closed when the generated section is missing its start marker", () => {
+    const current = `# Preamble\n\n${SECTION}Appendix.\n`;
+    const result = refreshGeneratedDoc(current, `generated body v2\n${MARKERS.end}\n`, MARKERS);
+    expect(result).toEqual({ action: "manual-review-required", reason: "generated section is missing the start marker" });
+  });
+
   it("fails closed with a reason when the current file has no marker block at all", () => {
     const current = "# Hand-written CLAUDE.md\n\nNo markers here.\n";
     const result = refreshGeneratedDoc(current, SECTION, MARKERS);
