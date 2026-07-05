@@ -29,6 +29,7 @@
     "build:mcp": "npm --workspace @jsonbored/gittensory-mcp run build",
     "build:miner": "npm --workspace @jsonbored/gittensory-engine run build && npm --workspace @jsonbored/gittensory-miner run build",
     "test:mcp-pack": "node scripts/check-mcp-package.mjs",
+    "test:miner-pack": "node scripts/check-miner-package.mjs",
     "rees:install": "npm ci --prefix review-enrichment --prefer-offline --no-audit --no-fund",
     "rees:test": "npm run rees:install && npm --prefix review-enrichment test",
     "rees:metadata": "npm --prefix review-enrichment run metadata",
