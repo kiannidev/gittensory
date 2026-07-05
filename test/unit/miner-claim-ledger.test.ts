@@ -141,6 +141,17 @@ describe("gittensory-miner claim ledger (#2314)", () => {
     expect(source).toContain("isDuplicateClusterWinnerByClaim");
   });
 
+  it("documents the miner_claims schema columns and uniqueness constraint (#3352)", () => {
+    const source = readFileSync("packages/gittensory-miner/lib/claim-ledger.js", "utf8");
+    expect(source).toContain("miner_claims schema (#3352)");
+    expect(source).toContain("repo_full_name TEXT NOT NULL");
+    expect(source).toContain("issue_number   INTEGER NOT NULL");
+    expect(source).toContain("claimed_at     TEXT NOT NULL");
+    expect(source).toContain("status         TEXT NOT NULL CHECK(status IN ('active','released','expired'))");
+    expect(source).toContain("UNIQUE (repo_full_name, issue_number)");
+    expect(source).toContain("not a separate released_at column");
+  });
+
   it("claimIssue and listActiveClaims expose the foundation-phase API surface (#3351)", () => {
     const ledger = tempLedger();
     const claim = ledger.claimIssue("o/a", 42, "via-alias");
