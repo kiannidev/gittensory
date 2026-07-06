@@ -7511,28 +7511,8 @@ async function maybePublishPrPublicSurface(
       reviewEligibility.skipReason,
       webhook.deliveryId,
     );
-    if (gateEnabled) {
-      const gateCheckResult = await createOrUpdateSkippedGateCheckRun(
-        env,
-        installationId,
-        repoFullName,
-        advisory,
-        "Review skipped: ignored author.",
-        mode,
-      );
-      /* v8 ignore next -- permission-missing audit behavior mirrors the existing skipped-check path above. */
-      if (gateCheckResult?.kind === "permission_missing") {
-        await auditGateCheckPermissionMissing(
-          env,
-          author,
-          repoFullName,
-          pr.number,
-          webhook.deliveryId,
-          gateCheckResult.warning,
-        );
-      }
-    }
-    return undefined;
+    publicSurfaceSkipped = true;
+    if (!shouldEvaluateGate) return undefined;
   }
   // A missing author already forces publicSurfaceSkipped=true above (decidePublicSurface's own
   // "missing_author" skip), so the guard just above already returns undefined whenever `!author` combines with
@@ -9015,7 +8995,12 @@ async function maybePublishPrPublicSurface(
             decisionOutcome: gateEvaluation?.conclusion,
           },
           () =>
-            autoReviewSkipReason
+            // #3698: a benign auto-review skip (draft, WIP title, too-large, docs-only, base-branch,
+            // auto-pause) shows the quiet "skipped (reason)" status -- but an IGNORED-AUTHOR skip also
+            // trips publicSurfaceSkipped, and that path exists specifically so the deterministic gate
+            // (e.g. the linked-issue hard rule) still shows its REAL, truthful conclusion instead of a
+            // "skipped" veneer that would let an ignored/excluded author's PR silently bypass it.
+            autoReviewSkipReason && !publicSurfaceSkipped
               ? createOrUpdateSkippedGateCheckRun(
                   env,
                   installationId,
@@ -9050,7 +9035,7 @@ async function maybePublishPrPublicSurface(
             headSha: advisory.headSha,
             checkRunId: gateCheckResult.id,
             /* v8 ignore next -- gate-enabled publication always has a gate evaluation. */
-            conclusion: autoReviewSkipReason ? "skipped" : (gateEvaluation?.conclusion ?? null),
+            conclusion: autoReviewSkipReason && !publicSurfaceSkipped ? "skipped" : (gateEvaluation?.conclusion ?? null),
             detailsUrl: gateCheckResult.html_url,
             deliveryId: webhook.deliveryId,
           }).catch((error) => {
