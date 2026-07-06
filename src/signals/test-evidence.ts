@@ -3,7 +3,7 @@ export {
   hasLocalTestEvidence,
   isTestPath,
   type TestCoverageClassification,
-} from "@jsonbored/gittensory-engine";
+} from "../../packages/gittensory-engine/src/test-evidence.js";
 
 // A body can mention testing without having actually done it ("No tests run", "Tests not run", "Not
 // tested locally", "did not run any tests") -- the affirmative keyword match below would otherwise treat

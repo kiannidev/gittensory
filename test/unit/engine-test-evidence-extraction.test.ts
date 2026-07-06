@@ -13,7 +13,7 @@ describe("engine test-evidence extraction (#2277)", () => {
 
   it("classifies coverage from engine-local helpers", () => {
     expect(isTestPath("src/widget.test.ts")).toBe(true);
-    expect(classifyTestCoverage(["src/a.ts", "src/a.test.ts"])).toBe("adequate");
+    expect(classifyTestCoverage(["src/a.ts", "src/a.test.ts"])).toBe("strong");
   });
 
   it("scores local metadata from the engine local-scorer port", () => {

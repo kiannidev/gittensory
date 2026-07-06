@@ -1,1 +1,1 @@
-export { computeLocalScorerTokens } from "@jsonbored/gittensory-engine";
+export { computeLocalScorerTokens } from "../../packages/gittensory-engine/src/local-scorer.js";
