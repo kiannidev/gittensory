@@ -360,13 +360,16 @@ export type FocusManifestReviewConfig = {
    *  source, same display-only (never touches the AI prompt) shape. null/false (default, absent) = no chip =
    *  byte-identical behavior. (#1955) */
   effortScore: boolean | null;
-  /** `review.test_generation` (#1972): when true, a diff that touches a small, precise set of boundary-condition
-   *  patterns (off-by-one array/index bounds, null/undefined branches, empty-collection checks — see
-   *  `src/signals/boundary-test-generation.ts`) with NO test evidence anywhere in the PR gets an additional
-   *  advisory finding plus a boundary-safe LOCAL-execution test-generation action spec (criteria/hints only,
-   *  never generated test code — mirrors the `src/mcp/local-write-tools.ts` no-cloud-write boundary). Purely
-   *  additive and deterministic; it never changes what `missingTestEvidence` already does. null/false (default,
-   *  absent) ⇒ byte-identical behavior — no boundary scan runs at all. */
+  /** `review.test_generation` (#1972, kill-switch config slice #2189): when true, a diff that touches a small,
+   *  precise set of boundary-condition patterns (off-by-one array/index bounds, null/undefined branches,
+   *  empty-collection checks — see `src/signals/boundary-test-generation.ts`) with NO test evidence anywhere in
+   *  the PR gets an additional advisory finding plus a boundary-safe LOCAL-execution
+   *  `gittensory_generate_tests` action spec (criteria/hints only, never generated test code — see
+   *  `src/mcp/local-write-tools.ts`'s `buildTestGenSpec`). Also gated by the operator's
+   *  `GITTENSORY_REVIEW_TEST_GENERATION` kill-switch (`src/review/test-generation.ts`'s
+   *  `isTestGenerationEnabled`) — the caller ANDs both. Purely additive and deterministic; it never changes what
+   *  `missingTestEvidence` already does. null/false (default, absent) ⇒ byte-identical behavior — no boundary
+   *  scan runs and no spec is ever built. */
   testGeneration: boolean | null;
   /** `review.finding_categories`: when true, an inline finding is ALSO tagged with a category (security/
    *  correctness/performance/maintainability/tests/style) — the AI reviewer is asked to self-categorize, with a
@@ -1829,6 +1832,7 @@ function parseReviewConfig(value: JsonValue | undefined, warnings: string[]): Fo
     aiModel,
     visual,
     linkedIssueSatisfaction,
+    testGeneration,
     enrichmentAnalyzers,
     profile,
     tone,
@@ -1837,7 +1841,6 @@ function parseReviewConfig(value: JsonValue | undefined, warnings: string[]): Fo
     suggestions,
     changedFilesSummary,
     effortScore,
-    testGeneration,
     findingCategories,
     minFindingSeverity,
     maxFindings,
@@ -2540,20 +2543,20 @@ export function resolveReviewPromptOverrides(manifest: FocusManifest | null): { 
   return { profile: manifest?.review.profile ?? null, tone: manifest?.review.tone ?? null, securityFocus: manifest?.review.securityFocus === true, inlineComments: manifest?.review.inlineComments === true, suggestions: manifest?.review.suggestions === true, changedFilesSummary: manifest?.review.changedFilesSummary === true, effortScore: manifest?.review.effortScore === true, findingCategories: manifest?.review.findingCategories === true, minFindingSeverity: manifest?.review.minFindingSeverity ?? null, maxFindings: manifest?.review.maxFindings ?? { ...EMPTY_MAX_FINDINGS_CONFIG }, pathInstructions: manifest?.review.pathInstructions ?? [], instructions: manifest?.review.instructions ?? null, excludePaths: manifest?.review.excludePaths ?? [], pathFilters: manifest?.review.pathFilters ?? [], selfHostAiModel: resolveReviewSelfHostAiModel(manifest) };
 }
 
+/** Resolve `review.test_generation` (#2189, config slice of #1972) from a possibly-null manifest (null = load
+ *  failure ⇒ manifest toggle reads as unset/false). Mirrors resolveReviewPromptOverrides's inlineComments
+ *  resolution — true ONLY when the manifest explicitly set review.test_generation: true; null/false/absent ⇒
+ *  false. The caller further ANDs this with the operator's GITTENSORY_REVIEW_TEST_GENERATION kill-switch via
+ *  shouldOfferTestGenerationSpec (src/review/test-generation.ts) before ever building a test-gen spec. */
+export function resolveTestGenerationManifestToggle(manifest: FocusManifest | null): boolean {
+  return manifest?.review.testGeneration === true;
+}
+
 /** Resolve `review.pre_merge_checks` from a possibly-null manifest (null = load failure ⇒ no checks). Centralized
  *  so the gate caller resolves them in one place with the null-manifest branch covered here (unit-tested) rather
  *  than inline in the processor. (#review-pre-merge-checks) */
 export function resolveReviewPreMergeChecks(manifest: FocusManifest | null): PreMergeCheck[] {
   return manifest?.review.preMergeChecks ?? [];
-}
-
-/** Resolve `review.test_generation` (#1972) from a possibly-null manifest (null = load failure ⇒ off). Deterministic/
- *  display-only like `resolveReviewPreMergeChecks` — this never touches the AI reviewer prompt, only whether the
- *  boundary-test-generation finding/spec (`src/signals/boundary-test-generation.ts`) is computed at all. Resolves to
- *  a strict boolean — true ONLY when the manifest explicitly set `review.test_generation: true`; null/false/absent ⇒
- *  false (byte-identical to today, no boundary scan runs). */
-export function resolveTestGenerationEnabled(manifest: FocusManifest | null): boolean {
-  return manifest?.review.testGeneration === true;
 }
 
 /** Resolve `review.enrichment` analyzer toggles from a possibly-null manifest (null = load failure ⇒ no toggles ⇒

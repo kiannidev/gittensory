@@ -19,7 +19,6 @@ import {
   resolveReviewPathInstructions,
   resolveReviewAutoReviewConfig,
   resolveReviewPreMergeChecks,
-  resolveTestGenerationEnabled,
   composeRepoReviewContext,
   evaluateAutoReviewSkipReason,
   resolveAutoReviewSkipSummary,
@@ -34,6 +33,7 @@ import {
   resolveReviewSelfHostAiModel,
   resolveReviewVisualConfig,
   repoDocGenerationConfigToJson,
+  resolveTestGenerationManifestToggle,
   reviewConfigToJson,
   reviewRecapConfigToJson,
   settingsOverrideToJson,
@@ -3066,6 +3066,13 @@ describe("resolveReviewPathInstructions (#review-path-instructions)", () => {
     expect(bad.warnings.some((w) => /review\.finding_categories.*must be a boolean/.test(w))).toBe(true);
   });
 
+  it("resolves review.test_generation's manifest toggle to a strict boolean (#2189)", () => {
+    expect(resolveTestGenerationManifestToggle(null)).toBe(false); // null manifest (load failure) ⇒ false
+    expect(resolveTestGenerationManifestToggle(parseFocusManifest({}))).toBe(false); // absent ⇒ false
+    expect(resolveTestGenerationManifestToggle(parseFocusManifest({ review: { test_generation: false } }))).toBe(false);
+    expect(resolveTestGenerationManifestToggle(parseFocusManifest({ review: { test_generation: true } }))).toBe(true);
+  });
+
   it("parses review.min_finding_severity, round-trips, and warns on invalid values (#2048)", () => {
     const major = parseFocusManifest({ review: { min_finding_severity: "major" } });
     expect(major.review.minFindingSeverity).toBe("major");
@@ -3737,13 +3744,6 @@ describe("review.pre_merge_checks (#review-pre-merge-checks)", () => {
     const manifest = parseFocusManifest({ review: { pre_merge_checks: [{ name: "c", require_label: "l" }] } });
     expect(resolveReviewPreMergeChecks(manifest)).toEqual(manifest.review.preMergeChecks);
     expect(resolveReviewPreMergeChecks(null)).toEqual([]);
-  });
-
-  it("resolveTestGenerationEnabled: true only when the manifest explicitly set review.test_generation: true (#1972)", () => {
-    expect(resolveTestGenerationEnabled(parseFocusManifest({ review: { test_generation: true } }))).toBe(true);
-    expect(resolveTestGenerationEnabled(parseFocusManifest({ review: { test_generation: false } }))).toBe(false);
-    expect(resolveTestGenerationEnabled(parseFocusManifest({ review: {} }))).toBe(false);
-    expect(resolveTestGenerationEnabled(null)).toBe(false);
   });
 });
 
