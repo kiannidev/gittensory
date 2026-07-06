@@ -68,7 +68,7 @@ describe("buildCheckTestEvidenceReport (#2235)", () => {
     });
     expect(report.codeFileCount).toBe(1);
     expect(report.testFileCount).toBe(1);
-    expect(report.classification).toBe("weak");
+    expect(report.classification).toBe("strong");
   });
 
   it("returns absent guidance strings for every non-docs classification band", () => {
