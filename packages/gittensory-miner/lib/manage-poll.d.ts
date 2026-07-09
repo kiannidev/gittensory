@@ -14,6 +14,9 @@ export type ManagePollEventPayload = {
   ciState: PollCheckRunsResult["conclusion"];
   gateVerdict: string;
   outcome: string;
+  rejectionReason?: string;
+  courtesyNote?: string;
+  closedAt?: string | null;
   lastPolledAt: string;
 };
 
@@ -38,10 +41,17 @@ export function mapPollConclusionToGateVerdict(
 
 export function mapPollConclusionToOutcome(conclusion: PollCheckRunsResult["conclusion"]): string;
 
+export function mapPollSnapshotToOutcome(pollResult: PollCheckRunsResult): string;
+
 export function buildManagePollEventPayload(
   prNumber: number,
   pollResult: PollCheckRunsResult,
-  options?: { branch?: string | null; lastPolledAt?: string },
+  options?: {
+    branch?: string | null;
+    lastPolledAt?: string;
+    repoFullName?: string;
+    supersededByDuplicate?: boolean;
+  },
 ): ManagePollEventPayload;
 
 export function parseManagePollArgs(args?: string[]): ParsedManagePollArgs;
@@ -58,6 +68,7 @@ export function recordManagePollSnapshot(
       options?: PollCheckRunsOptions,
     ) => Promise<PollCheckRunsResult>;
     lastPolledAt?: string;
+    supersededByDuplicate?: boolean;
   } & PollCheckRunsOptions,
 ): Promise<ManagePollRecordResult>;
 
@@ -74,5 +85,6 @@ export function runManagePoll(
     ) => Promise<PollCheckRunsResult>;
     githubToken?: string;
     lastPolledAt?: string;
+    supersededByDuplicate?: boolean;
   } & PollCheckRunsOptions,
 ): Promise<number>;

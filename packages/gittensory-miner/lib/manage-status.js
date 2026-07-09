@@ -34,6 +34,9 @@ function normalizeManageUpdatePayload(payload) {
     ciState: optionalString(payload.ciState),
     gateVerdict: optionalString(payload.gateVerdict),
     outcome: optionalString(payload.outcome),
+    rejectionReason: optionalString(payload.rejectionReason),
+    courtesyNote: optionalString(payload.courtesyNote),
+    closedAt: optionalString(payload.closedAt),
     lastPolledAt: optionalString(payload.lastPolledAt),
   };
 }

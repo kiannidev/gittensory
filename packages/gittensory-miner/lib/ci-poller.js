@@ -152,14 +152,24 @@ function backoffDelayMs(attemptIndex, options) {
   return Math.min(options.maxIntervalMs, options.minIntervalMs * 2 ** exponent);
 }
 
-async function fetchHeadSha(target, prNumber, options) {
+function normalizePullRequest(payload) {
+  const headSha = payload?.head?.sha;
+  if (typeof headSha !== "string" || !headSha) throw new Error("github_pr_head_sha_missing");
+  return {
+    headSha,
+    state: typeof payload?.state === "string" ? payload.state : "unknown",
+    merged: payload?.merged === true,
+    mergedAt: typeof payload?.merged_at === "string" ? payload.merged_at : null,
+    closedAt: typeof payload?.closed_at === "string" ? payload.closed_at : null,
+  };
+}
+
+async function fetchPullRequest(target, prNumber, options) {
   const payload = await githubGetJson(
     apiUrl(options.apiBaseUrl, repoPath(target, `/pulls/${prNumber}`)),
     options,
   );
-  const headSha = payload?.head?.sha;
-  if (typeof headSha !== "string" || !headSha) throw new Error("github_pr_head_sha_missing");
-  return headSha;
+  return normalizePullRequest(payload);
 }
 
 async function fetchCheckRuns(target, headSha, options) {
@@ -196,25 +206,33 @@ export async function pollCheckRuns(repoFullName, prNumber, options = {}) {
   const normalizedPrNumber = normalizePullNumber(prNumber);
   const normalizedOptions = normalizeOptions(options);
 
-  let latest = { conclusion: "pending", checks: [], headSha: "", attempts: 0 };
+  let latest = {
+    conclusion: "pending",
+    checks: [],
+    headSha: "",
+    pullRequest: null,
+    attempts: 0,
+  };
   for (let attempt = 0; attempt < normalizedOptions.maxAttempts; attempt += 1) {
-    const headSha = await fetchHeadSha(target, normalizedPrNumber, normalizedOptions);
-    const checks = await fetchCheckRuns(target, headSha, normalizedOptions);
+    const pullRequest = await fetchPullRequest(target, normalizedPrNumber, normalizedOptions);
+    const checks = await fetchCheckRuns(target, pullRequest.headSha, normalizedOptions);
     latest = {
       conclusion: aggregateConclusion(checks),
       checks,
-      headSha,
+      headSha: pullRequest.headSha,
+      pullRequest,
       attempts: attempt + 1,
     };
     if (latest.conclusion !== "pending") {
-      const currentHeadSha = await fetchHeadSha(target, normalizedPrNumber, normalizedOptions);
-      if (currentHeadSha === headSha) {
+      const currentPullRequest = await fetchPullRequest(target, normalizedPrNumber, normalizedOptions);
+      if (currentPullRequest.headSha === pullRequest.headSha) {
         return latest;
       }
       latest = {
         conclusion: "pending",
         checks: [],
-        headSha: currentHeadSha,
+        headSha: currentPullRequest.headSha,
+        pullRequest: currentPullRequest,
         attempts: attempt + 1,
       };
     }

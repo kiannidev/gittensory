@@ -14,11 +14,13 @@ import {
   buildManagePollEventPayload,
   mapPollConclusionToGateVerdict,
   mapPollConclusionToOutcome,
+  mapPollSnapshotToOutcome,
   parseManagePollArgs,
   recordManagePollSnapshot,
   runManagePoll,
 } from "../../packages/gittensory-miner/lib/manage-poll.js";
 import type { PollCheckRunsResult } from "../../packages/gittensory-miner/lib/ci-poller.d.ts";
+import { MINER_PR_OUTCOME_EVENT } from "../../packages/gittensory-miner/lib/pr-outcome.js";
 import {
   closeDefaultPortfolioQueueStore,
   initPortfolioQueueStore,
@@ -36,11 +38,21 @@ function tempStores() {
   return { portfolioQueue, eventLedger };
 }
 
-function pollResult(conclusion: PollCheckRunsResult["conclusion"]): PollCheckRunsResult {
+function pollResult(
+  conclusion: PollCheckRunsResult["conclusion"],
+  pullRequest: PollCheckRunsResult["pullRequest"] = {
+    headSha: "abc123",
+    state: "open",
+    merged: false,
+    mergedAt: null,
+    closedAt: null,
+  },
+): PollCheckRunsResult {
   return {
     conclusion,
     checks: [],
-    headSha: "abc123",
+    headSha: pullRequest?.headSha ?? "abc123",
+    pullRequest,
     attempts: 1,
   };
 }
@@ -77,6 +89,17 @@ describe("gittensory-miner manage poll (#2323/#2325)", () => {
     expect(mapPollConclusionToOutcome("failure")).toBe("needs-work");
     expect(mapPollConclusionToOutcome("neutral")).toBe("open");
     expect(
+      mapPollSnapshotToOutcome(
+        pollResult("success", {
+          headSha: "abc123",
+          state: "closed",
+          merged: false,
+          mergedAt: null,
+          closedAt: "2026-07-08T12:00:00.000Z",
+        }),
+      ),
+    ).toBe("disengaged");
+    expect(
       buildManagePollEventPayload(7, pollResult("success"), {
         branch: "feat/x",
         lastPolledAt: "2026-07-04T12:00:00.000Z",
@@ -89,6 +112,85 @@ describe("gittensory-miner manage poll (#2323/#2325)", () => {
       outcome: "ready",
       lastPolledAt: "2026-07-04T12:00:00.000Z",
     });
+  });
+
+  it("recordManagePollSnapshot transitions closed PRs to disengaged and records pr_outcome", async () => {
+    const { portfolioQueue, eventLedger } = tempStores();
+    const closedPullRequest = {
+      headSha: "abc123",
+      state: "closed",
+      merged: false,
+      mergedAt: null,
+      closedAt: "2026-07-08T12:00:00.000Z",
+    };
+    const pollCheckRuns = vi.fn().mockResolvedValue(pollResult("failure", closedPullRequest));
+
+    const result = await recordManagePollSnapshot(
+      { repoFullName: "acme/widgets", prNumber: 15, branch: "fix/ci" },
+      {
+        eventLedger,
+        portfolioQueue,
+        pollCheckRuns,
+        lastPolledAt: "2026-07-08T12:05:00.000Z",
+      },
+    );
+
+    expect(result.payload).toEqual(
+      expect.objectContaining({
+        prNumber: 15,
+        outcome: "disengaged",
+        rejectionReason: "gate_close",
+        courtesyNote: expect.stringContaining("#15"),
+        closedAt: "2026-07-08T12:00:00.000Z",
+      }),
+    );
+    expect(eventLedger.readEvents()).toEqual([
+      expect.objectContaining({
+        type: MANAGE_PR_UPDATE_EVENT,
+        payload: expect.objectContaining({ outcome: "disengaged", rejectionReason: "gate_close" }),
+      }),
+      expect.objectContaining({
+        type: MINER_PR_OUTCOME_EVENT,
+        payload: expect.objectContaining({
+          prNumber: 15,
+          decision: "closed",
+          outcome: "disengaged",
+          rejectionReason: "gate_close",
+        }),
+      }),
+    ]);
+    expect(collectManageStatus({ portfolioQueue, eventLedger })).toEqual([
+      expect.objectContaining({
+        repoFullName: "acme/widgets",
+        prNumber: 15,
+        outcome: "disengaged",
+      }),
+    ]);
+  });
+
+  it("classifies maintainer_close_no_reason when a closed PR has no gate block signal", async () => {
+    const { eventLedger } = tempStores();
+    const pollCheckRuns = vi.fn().mockResolvedValue(
+      pollResult("success", {
+        headSha: "abc123",
+        state: "closed",
+        merged: false,
+        mergedAt: null,
+        closedAt: "2026-07-08T12:00:00.000Z",
+      }),
+    );
+
+    const result = await recordManagePollSnapshot(
+      { repoFullName: "acme/widgets", prNumber: 16 },
+      { eventLedger, portfolioQueue: undefined, ensurePortfolioRow: false, pollCheckRuns },
+    );
+
+    expect(result.payload).toEqual(
+      expect.objectContaining({
+        outcome: "disengaged",
+        rejectionReason: "maintainer_close_no_reason",
+      }),
+    );
   });
 
   it("recordManagePollSnapshot appends manage_pr_update and ensures a portfolio row", async () => {

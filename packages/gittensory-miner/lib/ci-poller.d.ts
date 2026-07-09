@@ -1,5 +1,13 @@
 export type CheckRunConclusion = "pending" | "success" | "failure" | "neutral";
 
+export type PullRequestSnapshot = {
+  headSha: string;
+  state: string;
+  merged: boolean;
+  mergedAt: string | null;
+  closedAt: string | null;
+};
+
 export type NormalizedCheckRun = {
   name: string;
   status: string;
@@ -13,6 +21,7 @@ export type PollCheckRunsResult = {
   conclusion: CheckRunConclusion;
   checks: NormalizedCheckRun[];
   headSha: string;
+  pullRequest: PullRequestSnapshot | null;
   attempts: number;
 };
 

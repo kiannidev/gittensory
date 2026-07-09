@@ -5,6 +5,11 @@ import {
   formatManagedPrIdentifier,
 } from "./manage-status.js";
 import { initPortfolioQueueStore } from "./portfolio-queue.js";
+import {
+  buildDisengagedRejectionSnapshot,
+  isClosedWithoutMerge,
+  recordDisengagedPrOutcome,
+} from "./rejection-state-machine.js";
 
 const MANAGE_POLL_USAGE =
   "Usage: gittensory-miner manage poll <owner/repo> <pr#> [--branch <name>] [--json]";
@@ -41,6 +46,13 @@ export function mapPollConclusionToOutcome(conclusion) {
   }
 }
 
+export function mapPollSnapshotToOutcome(pollResult) {
+  if (pollResult?.pullRequest && isClosedWithoutMerge(pollResult.pullRequest)) {
+    return "disengaged";
+  }
+  return mapPollConclusionToOutcome(pollResult.conclusion);
+}
+
 export function buildManagePollEventPayload(prNumber, pollResult, options = {}) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) throw new Error("invalid_pr_number");
   if (!pollResult || typeof pollResult !== "object") throw new Error("invalid_poll_result");
@@ -49,14 +61,32 @@ export function buildManagePollEventPayload(prNumber, pollResult, options = {}) 
     typeof options.lastPolledAt === "string" && options.lastPolledAt.trim()
       ? options.lastPolledAt.trim()
       : new Date().toISOString();
-  return {
+  const gateVerdict = mapPollConclusionToGateVerdict(pollResult.conclusion);
+  const outcome = mapPollSnapshotToOutcome(pollResult);
+  const payload = {
     prNumber,
     branch,
     ciState: pollResult.conclusion,
-    gateVerdict: mapPollConclusionToGateVerdict(pollResult.conclusion),
-    outcome: mapPollConclusionToOutcome(pollResult.conclusion),
+    gateVerdict,
+    outcome,
     lastPolledAt,
   };
+
+  if (outcome === "disengaged") {
+    const rejection = buildDisengagedRejectionSnapshot({
+      repoFullName: options.repoFullName,
+      prNumber,
+      pullRequest: pollResult.pullRequest,
+      gateVerdict,
+      ciState: pollResult.conclusion,
+      supersededByDuplicate: options.supersededByDuplicate === true,
+    });
+    payload.rejectionReason = rejection.rejectionReason;
+    payload.courtesyNote = rejection.courtesyNote;
+    payload.closedAt = rejection.closedAt;
+  }
+
+  return payload;
 }
 
 export function parseManagePollArgs(args = []) {
@@ -144,6 +174,8 @@ export async function recordManagePollSnapshot(input, options = {}) {
   const payload = buildManagePollEventPayload(input.prNumber, pollResult, {
     branch: input.branch,
     lastPolledAt: options.lastPolledAt,
+    repoFullName,
+    supersededByDuplicate: options.supersededByDuplicate,
   });
 
   if ((options.ensurePortfolioRow ?? true) && portfolioQueue) {
@@ -155,6 +187,20 @@ export async function recordManagePollSnapshot(input, options = {}) {
     repoFullName,
     payload,
   });
+
+  if (payload.outcome === "disengaged") {
+    recordDisengagedPrOutcome(
+      {
+        repoFullName,
+        prNumber: input.prNumber,
+        pullRequest: pollResult.pullRequest,
+        gateVerdict: payload.gateVerdict,
+        ciState: payload.ciState,
+        supersededByDuplicate: options.supersededByDuplicate === true,
+      },
+      { eventLedger },
+    );
+  }
 
   return { pollResult, payload, event };
 }

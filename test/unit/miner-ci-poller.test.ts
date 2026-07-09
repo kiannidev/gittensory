@@ -7,8 +7,25 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return Response.json(body, init);
 }
 
-function prResponse(sha = "abc123") {
-  return jsonResponse({ head: { sha } });
+function prResponse(sha = "abc123", overrides: Record<string, unknown> = {}) {
+  return jsonResponse({
+    head: { sha },
+    state: "open",
+    merged: false,
+    merged_at: null,
+    closed_at: null,
+    ...overrides,
+  });
+}
+
+function openPullRequest(sha = "abc123") {
+  return {
+    headSha: sha,
+    state: "open",
+    merged: false,
+    mergedAt: null,
+    closedAt: null,
+  };
 }
 
 function checkRun(name: string, status: string, conclusion: string | null = null) {
@@ -47,6 +64,7 @@ describe("miner CI check-run poller (#2323)", () => {
     expect(result).toEqual({
       conclusion: "success",
       headSha: "head-sha",
+      pullRequest: openPullRequest("head-sha"),
       attempts: 1,
       checks: [
         {
@@ -313,6 +331,32 @@ describe("miner CI check-run poller (#2323)", () => {
       checks: [{ name: "validate", conclusion: "failure" }],
     });
     expect(fetchFn).toHaveBeenCalledTimes(6);
+  });
+
+  it("surfaces closed-without-merge PR state from the pull request payload", async () => {
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/repos/acme/widgets/pulls/44")) {
+        return prResponse("closed-head", {
+          state: "closed",
+          merged: false,
+          closed_at: "2026-07-08T12:00:00.000Z",
+        });
+      }
+      if (url.endsWith("/repos/acme/widgets/commits/closed-head/check-runs?per_page=100&page=1")) {
+        return checksResponse([checkRun("validate", "completed", "success")]);
+      }
+      return jsonResponse({}, { status: 404 });
+    });
+
+    const result = await pollCheckRuns("acme/widgets", 44, { apiBaseUrl: API, fetchFn });
+    expect(result.pullRequest).toEqual({
+      headSha: "closed-head",
+      state: "closed",
+      merged: false,
+      mergedAt: null,
+      closedAt: "2026-07-08T12:00:00.000Z",
+    });
   });
 
   it("validates repo and PR input before fetching", async () => {
