@@ -1617,7 +1617,8 @@ export function reviewRecapConfigToJson(config: FocusManifestReviewRecapConfig):
  * Parse the optional `maintainerRecap:` mapping (#1963, #2250). Mirrors {@link parseReviewRecapConfig}: every
  * field has a concrete default (no DB layer to overlay onto), so the parsed value IS the effective value. An
  * invalid `cadence`/`channel` falls back to its default via {@link normalizeEnum} (with a warning) rather than
- * silently firing more often or targeting an unsupported channel.
+ * silently firing more often or targeting an unsupported channel. When upstream gate-precision/outcome-calibration
+ * reports carry an aggregate-only miner-vs-human split, the recap digest adds a Cohort section (#4521).
  */
 function parseMaintainerRecapConfig(value: JsonValue | undefined, warnings: string[]): FocusManifestMaintainerRecapConfig {
   if (value === undefined || value === null) return { ...EMPTY_MAINTAINER_RECAP_CONFIG };

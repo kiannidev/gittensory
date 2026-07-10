@@ -14,7 +14,9 @@ import { PUBLIC_LOCAL_PATH_SCRUB_PATTERN, PUBLIC_UNSAFE_PATTERN } from "../signa
 import { deliverRecapToDiscord, deliverRecapToSlack } from "./notify-discord";
 import type { GatePrecisionReport } from "./gate-precision";
 import type { OutcomeCalibration } from "./outcome-calibration";
-import type { MaintainerRecapRepo, RecapReport } from "../types";
+import { buildCohortRecapSection } from "./maintainer-recap-cohort";
+import type { ContributorCohort } from "./contributor-cohort";
+import type { MaintainerRecapCohortSlice, MaintainerRecapRepo, RecapReport } from "../types";
 import { nowIso } from "../utils/json";
 
 const DEFAULT_WINDOW_DAYS = 7;
@@ -36,8 +38,82 @@ function sanitizeRecapText(value: string): string {
 }
 
 /** One repo's two already-computed aggregators. Both carry the SAME repoFullName; the gate report drives repo
- *  identity. Injected by the caller (no new D1 read here), exactly like buildWeeklyValueReport's inputs. */
+ *  identity. Injected by the caller (no new D1 read here), exactly like buildWeeklyValueReport's inputs.
+ *  Upstream reports may optionally include aggregate-only miner-vs-human cohort splits (#4521). */
 export type MaintainerRecapRepoInput = { gatePrecision: GatePrecisionReport; calibration: OutcomeCalibration };
+
+function emptyCohortSlice(): MaintainerRecapCohortSlice {
+  return { reviewed: 0, merged: 0, closed: 0, blocked: 0, gateFalsePositives: 0, gateFalsePositiveRate: null };
+}
+
+function foldCohortSlice(
+  target: MaintainerRecapCohortSlice,
+  cohort: ContributorCohort,
+  gatePrecision: GatePrecisionReport,
+  calibration: OutcomeCalibration,
+): void {
+  const slop = calibration.slop.byCohort?.[cohort];
+  const gate = gatePrecision.overall.byCohort?.[cohort];
+  if (!slop && !gate) return;
+  if (slop) {
+    target.reviewed += slop.totalResolved;
+    target.merged += slop.merged;
+    target.closed += slop.closed;
+  }
+  if (gate) {
+    target.blocked += gate.blocked;
+    target.gateFalsePositives += gate.blockedThenMerged;
+  }
+}
+
+function finalizeCohortRate(slice: MaintainerRecapCohortSlice): MaintainerRecapCohortSlice {
+  slice.gateFalsePositiveRate =
+    slice.blocked > 0 ? Math.round((slice.gateFalsePositives / slice.blocked) * 100) / 100 : null;
+  return slice;
+}
+
+function buildRepoCohorts(
+  gatePrecision: GatePrecisionReport,
+  calibration: OutcomeCalibration,
+): Partial<Record<ContributorCohort, MaintainerRecapCohortSlice>> | undefined {
+  const miner = emptyCohortSlice();
+  const human = emptyCohortSlice();
+  foldCohortSlice(miner, "miner", gatePrecision, calibration);
+  foldCohortSlice(human, "human", gatePrecision, calibration);
+  const cohorts: Partial<Record<ContributorCohort, MaintainerRecapCohortSlice>> = {};
+  if (miner.reviewed > 0 || miner.blocked > 0) cohorts.miner = finalizeCohortRate(miner);
+  if (human.reviewed > 0 || human.blocked > 0) cohorts.human = finalizeCohortRate(human);
+  return Object.keys(cohorts).length > 0 ? cohorts : undefined;
+}
+
+function foldFleetCohorts(
+  repos: MaintainerRecapRepo[],
+): Partial<Record<ContributorCohort, MaintainerRecapCohortSlice>> | undefined {
+  const miner = emptyCohortSlice();
+  const human = emptyCohortSlice();
+  for (const repo of repos) {
+    if (repo.cohorts?.miner) {
+      const slice = repo.cohorts.miner;
+      miner.reviewed += slice.reviewed;
+      miner.merged += slice.merged;
+      miner.closed += slice.closed;
+      miner.blocked += slice.blocked;
+      miner.gateFalsePositives += slice.gateFalsePositives;
+    }
+    if (repo.cohorts?.human) {
+      const slice = repo.cohorts.human;
+      human.reviewed += slice.reviewed;
+      human.merged += slice.merged;
+      human.closed += slice.closed;
+      human.blocked += slice.blocked;
+      human.gateFalsePositives += slice.gateFalsePositives;
+    }
+  }
+  const cohorts: Partial<Record<ContributorCohort, MaintainerRecapCohortSlice>> = {};
+  if (miner.reviewed > 0 || miner.blocked > 0) cohorts.miner = finalizeCohortRate(miner);
+  if (human.reviewed > 0 || human.blocked > 0) cohorts.human = finalizeCohortRate(human);
+  return Object.keys(cohorts).length > 0 ? cohorts : undefined;
+}
 
 export type MaintainerRecapInputs = {
   generatedAt: string;
@@ -70,6 +146,7 @@ export function buildMaintainerRecap(args: MaintainerRecapInputs): RecapReport {
     }
     let gateOverrides = 0;
     for (const perType of gatePrecision.perGateType) gateOverrides += perType.overridden;
+    const repoCohorts = buildRepoCohorts(gatePrecision, calibration);
     const repo: MaintainerRecapRepo = {
       repoFullName: sanitizeRecapText(gatePrecision.repoFullName),
       reviewed: calibration.slop.totalResolved,
@@ -78,6 +155,7 @@ export function buildMaintainerRecap(args: MaintainerRecapInputs): RecapReport {
       gateFalsePositives: gatePrecision.overall.blockedThenMerged,
       gateOverrides,
       reversals: calibration.recommendations.negative,
+      ...(repoCohorts ? { cohorts: repoCohorts } : {}),
     };
     repos.push(repo);
     totals.reviewed += repo.reviewed;
@@ -99,7 +177,8 @@ export function buildMaintainerRecap(args: MaintainerRecapInputs): RecapReport {
     rateLine,
     `${totals.gateOverrides} maintainer override(s), ${totals.reversals} recommendation reversal(s).`,
   ].map(sanitizeRecapText);
-  return { generatedAt: args.generatedAt, windowDays, repos, totals, summary };
+  const cohorts = foldFleetCohorts(repos);
+  return { generatedAt: args.generatedAt, windowDays, repos, totals, summary, ...(cohorts ? { cohorts } : {}) };
 }
 
 /** Redact one free-text line bound for the public digest body. Two arms mirroring weekly-value-report.ts's
@@ -129,6 +208,7 @@ export function formatMaintainerRecap(report: RecapReport): string {
     (repo) =>
       `${redactRecapLine(repo.repoFullName)} — ${repo.reviewed} reviewed, ${repo.merged} merged, ${repo.closed} closed, ${repo.gateFalsePositives} gate false-positive(s), ${repo.gateOverrides} override(s), ${repo.reversals} reversal(s)`,
   );
+  const cohortSection = buildCohortRecapSection(report);
   const lines = [
     "# Maintainer recap",
     "",
@@ -146,6 +226,9 @@ export function formatMaintainerRecap(report: RecapReport): string {
     `- Gate false positives: ${totals.gateFalsePositives}/${totals.blocked} (${rate})`,
     `- Overrides: ${totals.gateOverrides}`,
     `- Reversals: ${totals.reversals}`,
+    ...(cohortSection
+      ? ["", `## ${cohortSection.title}`, ...recapSectionLines(cohortSection.lines, "_No cohort data for this window._")]
+      : []),
     "",
     "## Per-repo",
     ...recapSectionLines(perRepoLines, "_No repositories in this window._"),

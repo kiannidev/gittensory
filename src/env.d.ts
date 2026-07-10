@@ -351,7 +351,9 @@ declare global {
      *  default "weekly"; an invalid value falls back to "weekly") picks how often; GITTENSORY_RECAP_HOUR
      *  (0-23, default 14) and GITTENSORY_RECAP_DAY (0-6, Sunday=0, default 1/Monday, only consulted when
      *  weekly) pick when, so the tick fires at most once per period. Default OFF -- unset/false means the
-     *  cron enqueues NO recap job, byte-identical to today. See src/review/maintainer-recap-wire.ts. */
+     *  cron enqueues NO recap job, byte-identical to today. When upstream gate-precision/outcome-calibration
+     *  reports carry an aggregate-only miner-vs-human split, the recap adds a Cohort section (#4521). See
+     *  src/review/maintainer-recap-wire.ts. */
     GITTENSORY_MAINTAINER_RECAP?: string;
     GITTENSORY_RECAP_CADENCE?: string;
     GITTENSORY_RECAP_HOUR?: string;

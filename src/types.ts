@@ -2444,6 +2444,16 @@ export type ReviewRecap = {
   summary: string[];
 };
 
+/** Aggregate-only miner-vs-human slice inside a maintainer recap (#4521). Counts only — no actor logins. */
+export type MaintainerRecapCohortSlice = {
+  reviewed: number;
+  merged: number;
+  closed: number;
+  blocked: number;
+  gateFalsePositives: number;
+  gateFalsePositiveRate: number | null;
+};
+
 /** One repo's realized review-outcome roll-up inside a maintainer recap window (#2239, foundation for #1963).
  *  Counts are ground-truth PR outcomes + gate/recommendation calibration totals — never predictions. */
 export type MaintainerRecapRepo = {
@@ -2458,6 +2468,8 @@ export type MaintainerRecapRepo = {
   gateOverrides: number;
   /** Recommendations that resolved NEGATIVELY (a reversal) over the window, from the outcome calibration. */
   reversals: number;
+  /** Present when upstream gate-precision/outcome-calibration carried a cohort split for this repo. */
+  cohorts?: Partial<Record<"miner" | "human", MaintainerRecapCohortSlice>>;
 };
 
 /** A serializable maintainer recap: a window of gittensory's OWN review-outcome data folded across repos.
@@ -2480,5 +2492,7 @@ export type RecapReport = {
     /** Aggregate false-positive rate (gateFalsePositives / blocked), null when nothing was blocked. */
     gateFalsePositiveRate: number | null;
   };
+  /** Fleet-wide miner-vs-human cohort roll-up when upstream aggregates carried a split (#4521). */
+  cohorts?: Partial<Record<"miner" | "human", MaintainerRecapCohortSlice>>;
   summary: string[];
 };

@@ -17,7 +17,7 @@ function block(pullNumber: number, blockerCodes: string[], overridden = false): 
 
 // A resolved PR: `merged` → has a merge timestamp (a false positive when it was also blocked); otherwise
 // closed-unmerged (the block held). `open` PRs have no terminal outcome yet.
-function pr(number: number, outcome: "merged" | "closed" | "open"): PullRequestRecord {
+function pr(number: number, outcome: "merged" | "closed" | "open", authorLogin?: string): PullRequestRecord {
   return {
     repoFullName: "owner/repo",
     number,
@@ -26,6 +26,7 @@ function pr(number: number, outcome: "merged" | "closed" | "open"): PullRequestR
     mergedAt: outcome === "merged" ? "2026-06-01T00:00:00.000Z" : null,
     labels: [],
     linkedIssues: [],
+    ...(authorLogin === undefined ? {} : { authorLogin }),
   };
 }
 
@@ -84,6 +85,23 @@ describe("buildGatePrecisionReport", () => {
   it("carries no actor login or trust/reward fields (privacy)", () => {
     const report = buildGatePrecisionReport([block(1, ["x"])], [pr(1, "merged")]);
     expect(JSON.stringify(report)).not.toMatch(/login|actor|reward|payout|trust|wallet|hotkey|credibility/i);
+  });
+
+  it("partitions overall precision by miner-vs-human cohort when confirmed miner logins are provided", () => {
+    const miners = new Set(["miner-author"]);
+    const blocks = [block(1, ["x"]), block(2, ["x"]), block(3, ["x"]), block(4, ["x"]), block(5, ["x"]), block(6, ["x"])];
+    const prs = [
+      pr(1, "merged", "miner-author"),
+      pr(2, "merged", "miner-author"),
+      pr(3, "closed", "miner-author"),
+      pr(4, "closed", "miner-author"),
+      pr(5, "closed", "miner-author"),
+      pr(6, "merged", "human-author"),
+    ];
+    const report = buildGatePrecisionReport(blocks, prs, { confirmedMinerLogins: miners });
+    expect(report.overall.byCohort?.miner).toMatchObject({ blocked: 5, blockedThenMerged: 2, falsePositiveRate: 0.4 });
+    expect(report.overall.byCohort?.human).toMatchObject({ blocked: 1, blockedThenMerged: 1, falsePositiveRate: null });
+    expect(JSON.stringify(report.overall.byCohort)).not.toMatch(/miner-author|human-author/);
   });
 
   it("scopes to options.repoFullName — ignores blocks and PRs from other repos", () => {

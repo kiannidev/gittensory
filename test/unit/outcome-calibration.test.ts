@@ -13,7 +13,7 @@ import type { AgentActionRecord, AgentRecommendationOutcomeRecord, AgentRecommen
 import { createTestEnv } from "../helpers/d1";
 
 // A resolved PR carrying a slop assessment. `merged` → has a merge timestamp; otherwise closed-unmerged.
-function pr(band: SlopBand, merged: boolean, number: number): PullRequestRecord {
+function pr(band: SlopBand, merged: boolean, number: number, authorLogin?: string): PullRequestRecord {
   return {
     repoFullName: "owner/repo",
     number,
@@ -24,6 +24,7 @@ function pr(band: SlopBand, merged: boolean, number: number): PullRequestRecord 
     linkedIssues: [],
     slopRisk: band === "clean" ? 0 : band === "low" ? 10 : band === "elevated" ? 40 : 70,
     slopBand: band,
+    ...(authorLogin === undefined ? {} : { authorLogin }),
   };
 }
 
@@ -52,6 +53,17 @@ describe("buildSlopOutcomeCalibration", () => {
     const result = buildSlopOutcomeCalibration([...band("clean", 2, 2, 0), ...band("high", 2, 0, 100)]);
     expect(result.discriminates).toBeNull(); // each band below the min sample
     expect(result.totalResolved).toBe(4);
+  });
+
+  it("partitions resolved outcomes by miner-vs-human cohort when confirmed miner logins are provided", () => {
+    const miners = new Set(["miner-author"]);
+    const result = buildSlopOutcomeCalibration(
+      [pr("clean", true, 1, "miner-author"), pr("clean", true, 2, "miner-author"), pr("clean", true, 3, "human-author"), pr("clean", false, 4, "human-author")],
+      { confirmedMinerLogins: miners },
+    );
+    expect(result.byCohort?.miner).toMatchObject({ totalResolved: 2, merged: 2, closed: 0 });
+    expect(result.byCohort?.human).toMatchObject({ totalResolved: 2, merged: 1, closed: 1 });
+    expect(JSON.stringify(result.byCohort)).not.toMatch(/miner-author|human-author/);
   });
 
   it("excludes open PRs and PRs with no slop assessment", () => {

@@ -90,4 +90,31 @@ describe("formatMaintainerRecap (#2240)", () => {
     expect(body).toContain("- <redacted>");
     expect(body).not.toContain("payout");
   });
+
+  it("renders a cohort section when miner-vs-human aggregates are present", () => {
+    const body = formatMaintainerRecap({
+      generatedAt: GEN,
+      windowDays: 7,
+      repos: [],
+      totals: {
+        reviewed: 7,
+        merged: 5,
+        closed: 2,
+        blocked: 11,
+        gateFalsePositives: 3,
+        gateOverrides: 0,
+        reversals: 0,
+        gateFalsePositiveRate: 0.273,
+      },
+      cohorts: {
+        miner: { reviewed: 3, merged: 2, closed: 1, blocked: 5, gateFalsePositives: 1, gateFalsePositiveRate: 0.2 },
+        human: { reviewed: 4, merged: 3, closed: 1, blocked: 6, gateFalsePositives: 2, gateFalsePositiveRate: 0.333 },
+      },
+      summary: ["Blended recap line."],
+    });
+    expect(body).toContain("## Cohort");
+    expect(body).toContain("Miner-originated: 2 merged of 3 reviewed");
+    expect(body).toContain("Human-originated: 3 merged of 4 reviewed");
+    expect(body).not.toMatch(/login|@/);
+  });
 });

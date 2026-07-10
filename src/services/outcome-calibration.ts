@@ -12,6 +12,11 @@ import { listAgentRecommendationOutcomes, listPullRequests } from "../db/reposit
 import type { SlopBand } from "../signals/slop";
 import type { AgentRecommendationOutcomeRecord, PullRequestRecord } from "../types";
 import { nowIso } from "../utils/json";
+import {
+  classifyPullRequestCohort,
+  loadConfirmedMinerLoginsForPullRequests,
+  type ContributorCohort,
+} from "./contributor-cohort";
 
 // Severity order — calibration checks that merge rate is non-increasing along it.
 const SLOP_BAND_ORDER: readonly SlopBand[] = ["clean", "low", "elevated", "high"];
@@ -20,10 +25,14 @@ const MIN_BAND_SAMPLE = 5;
 
 export type SlopBandCalibration = { band: SlopBand; sampleSize: number; merged: number; closed: number; mergeRate: number };
 
+export type SlopCohortOutcomeCounts = { totalResolved: number; merged: number; closed: number };
+
 export type SlopOutcomeCalibration = {
   totalResolved: number;
   bands: SlopBandCalibration[];
   overallMergeRate: number | null;
+  /** Aggregate-only miner-vs-human split when official-miner detection is available (#4520/#4521). */
+  byCohort?: Partial<Record<ContributorCohort, SlopCohortOutcomeCounts>>;
   /** True iff the score discriminates (merge rate non-increasing as band severity rises) given enough
    *  per-band sample; false iff it inverts; null iff there isn't enough resolved data to judge. */
   discriminates: boolean | null;
@@ -58,7 +67,15 @@ function terminalOutcome(pr: PullRequestRecord): "merged" | "closed" | null {
 }
 
 /** Per-slop-band merge/close calibration over the resolved PRs that carry a slop assessment. Pure. */
-export function buildSlopOutcomeCalibration(pullRequests: PullRequestRecord[]): SlopOutcomeCalibration {
+export function buildSlopOutcomeCalibration(
+  pullRequests: PullRequestRecord[],
+  options: { confirmedMinerLogins?: ReadonlySet<string> } = {},
+): SlopOutcomeCalibration {
+  const trackCohorts = Boolean(options.confirmedMinerLogins);
+  const cohortCounts: Record<ContributorCohort, SlopCohortOutcomeCounts> = {
+    miner: { totalResolved: 0, merged: 0, closed: 0 },
+    human: { totalResolved: 0, merged: 0, closed: 0 },
+  };
   const counts = new Map<SlopBand, { merged: number; closed: number }>();
   let totalMerged = 0;
   let totalResolved = 0;
@@ -77,16 +94,34 @@ export function buildSlopOutcomeCalibration(pullRequests: PullRequestRecord[]): 
     }
     counts.set(band, entry);
     totalResolved += 1;
+    if (trackCohorts && options.confirmedMinerLogins) {
+      const cohort = classifyPullRequestCohort(pr, options.confirmedMinerLogins);
+      if (cohort) {
+        const bucket = cohortCounts[cohort];
+        bucket.totalResolved += 1;
+        if (outcome === "merged") bucket.merged += 1;
+        else bucket.closed += 1;
+      }
+    }
   }
   const bands: SlopBandCalibration[] = SLOP_BAND_ORDER.map((band) => {
     const { merged, closed } = counts.get(band) ?? { merged: 0, closed: 0 };
     const sampleSize = merged + closed;
     return { band, sampleSize, merged, closed, mergeRate: sampleSize > 0 ? round(merged / sampleSize) : 0 };
   });
+  const byCohort = trackCohorts
+    ? (["miner", "human"] as const).reduce<Partial<Record<ContributorCohort, SlopCohortOutcomeCounts>>>((acc, cohort) => {
+        const bucket = cohortCounts[cohort];
+        if (bucket.totalResolved === 0) return acc;
+        acc[cohort] = { ...bucket };
+        return acc;
+      }, {})
+    : undefined;
   return {
     totalResolved,
     bands,
     overallMergeRate: totalResolved > 0 ? round(totalMerged / totalResolved) : null,
+    ...(byCohort && Object.keys(byCohort).length > 0 ? { byCohort } : {}),
     discriminates: computeDiscriminates(bands),
   };
 }
@@ -158,7 +193,8 @@ export async function buildRepoOutcomeCalibration(
     listPullRequests(env, repoFullName),
     listAgentRecommendationOutcomes(env, windowDays !== undefined ? { repoFullName, windowDays } : { repoFullName }),
   ]);
-  const slop = buildSlopOutcomeCalibration(pullRequests);
+  const confirmedMinerLogins = await loadConfirmedMinerLoginsForPullRequests(env, pullRequests);
+  const slop = buildSlopOutcomeCalibration(pullRequests, { confirmedMinerLogins });
   const recommendations = buildRecommendationOutcomeCalibration(outcomes, repoFullName, options);
   return { repoFullName, generatedAt: nowIso(), windowDays: windowDays ?? null, slop, recommendations, signals: buildOutcomeCalibrationSignals(slop, recommendations) };
 }

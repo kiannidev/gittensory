@@ -20,6 +20,10 @@ function repoInput(
     closed?: number;
     reversals?: number;
     emptyBands?: boolean;
+    cohort?: {
+      miner?: { reviewed: number; merged: number; closed: number; blocked: number; blockedThenMerged: number };
+      human?: { reviewed: number; merged: number; closed: number; blocked: number; blockedThenMerged: number };
+    };
   } = {},
 ): MaintainerRecapRepoInput {
   const blocked = c.blocked ?? 0;
@@ -33,14 +37,55 @@ function repoInput(
       generatedAt: GEN,
       windowDays: 7,
       perGateType: [{ gateType: "missing_linked_issue", blocked, blockedThenMerged, overridden: c.overridden ?? 0, falsePositiveRate: null }],
-      overall: { blocked, blockedThenMerged, falsePositiveRate: null },
+      overall: {
+        blocked,
+        blockedThenMerged,
+        falsePositiveRate: null,
+        ...(c.cohort
+          ? {
+              byCohort: {
+                ...(c.cohort.miner
+                  ? {
+                      miner: {
+                        blocked: c.cohort.miner.blocked,
+                        blockedThenMerged: c.cohort.miner.blockedThenMerged,
+                        falsePositiveRate: c.cohort.miner.blocked >= 5 ? c.cohort.miner.blockedThenMerged / c.cohort.miner.blocked : null,
+                      },
+                    }
+                  : {}),
+                ...(c.cohort.human
+                  ? {
+                      human: {
+                        blocked: c.cohort.human.blocked,
+                        blockedThenMerged: c.cohort.human.blockedThenMerged,
+                        falsePositiveRate: c.cohort.human.blocked >= 5 ? c.cohort.human.blockedThenMerged / c.cohort.human.blocked : null,
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      },
       signals: [],
     },
     calibration: {
       repoFullName,
       generatedAt: GEN,
       windowDays: 7,
-      slop: { totalResolved: c.totalResolved ?? 0, bands, overallMergeRate: null, discriminates: null },
+      slop: {
+        totalResolved: c.totalResolved ?? 0,
+        bands,
+        overallMergeRate: null,
+        discriminates: null,
+        ...(c.cohort
+          ? {
+              byCohort: {
+                ...(c.cohort.miner ? { miner: { totalResolved: c.cohort.miner.reviewed, merged: c.cohort.miner.merged, closed: c.cohort.miner.closed } } : {}),
+                ...(c.cohort.human ? { human: { totalResolved: c.cohort.human.reviewed, merged: c.cohort.human.merged, closed: c.cohort.human.closed } } : {}),
+              },
+            }
+          : {}),
+      },
       recommendations: { total: 0, positive: 0, negative: c.reversals ?? 0, pending: 0, positiveRate: null },
       signals: [],
     },
@@ -98,6 +143,24 @@ describe("buildMaintainerRecap (#2239)", () => {
     const report = buildMaintainerRecap({ generatedAt: GEN, repos: [repoInput("/Users/secret/repo", { blocked: 1, blockedThenMerged: 0 })] });
     expect(report.repos[0]?.repoFullName).toContain("<redacted-path>");
     expect(report.repos[0]?.repoFullName).not.toContain("/Users/secret");
+  });
+
+  it("folds miner-vs-human cohort slices when upstream reports carry them", () => {
+    const report = buildMaintainerRecap({
+      generatedAt: GEN,
+      repos: [
+        repoInput("owner/repo-a", {
+          cohort: {
+            miner: { reviewed: 3, merged: 2, closed: 1, blocked: 5, blockedThenMerged: 1 },
+            human: { reviewed: 4, merged: 3, closed: 1, blocked: 6, blockedThenMerged: 2 },
+          },
+        }),
+      ],
+    });
+    expect(report.cohorts?.miner).toMatchObject({ reviewed: 3, merged: 2, closed: 1, blocked: 5, gateFalsePositives: 1, gateFalsePositiveRate: 0.2 });
+    expect(report.cohorts?.human).toMatchObject({ reviewed: 4, merged: 3, closed: 1, blocked: 6, gateFalsePositives: 2, gateFalsePositiveRate: 0.33 });
+    expect(report.repos[0]?.cohorts?.miner?.merged).toBe(2);
+    expect(JSON.stringify(report)).not.toMatch(/login|author/i);
   });
 });
 

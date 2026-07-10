@@ -17,6 +17,11 @@
 import { listGateOutcomes, listPullRequests } from "../db/repositories";
 import type { GateOutcomeRecord, PullRequestRecord } from "../types";
 import { nowIso } from "../utils/json";
+import {
+  classifyPullRequestCohort,
+  loadConfirmedMinerLoginsForPullRequests,
+  type ContributorCohort,
+} from "./contributor-cohort";
 
 // Below this per-gate-type blocked sample the false-positive rate is too noisy to judge.
 const MIN_SAMPLE = 5;
@@ -29,12 +34,26 @@ export type GatePrecisionPerType = {
   falsePositiveRate: number | null;
 };
 
+export type GatePrecisionCohortOverall = {
+  blocked: number;
+  blockedThenMerged: number;
+  falsePositiveRate: number | null;
+};
+
+export type GatePrecisionOverall = {
+  blocked: number;
+  blockedThenMerged: number;
+  falsePositiveRate: number | null;
+  /** Aggregate-only miner-vs-human split when official-miner detection is available (#4520/#4521). */
+  byCohort?: Partial<Record<ContributorCohort, GatePrecisionCohortOverall>>;
+};
+
 export type GatePrecisionReport = {
   repoFullName: string;
   generatedAt: string;
   windowDays: number | null;
   perGateType: GatePrecisionPerType[];
-  overall: { blocked: number; blockedThenMerged: number; falsePositiveRate: number | null };
+  overall: GatePrecisionOverall;
   signals: string[];
 };
 
@@ -64,9 +83,12 @@ function sameRepo(a: string | null | undefined, b: string): boolean {
 export function buildGatePrecisionReport(
   outcomes: GateOutcomeRecord[],
   pullRequests: PullRequestRecord[],
-  options: { repoFullName?: string } = {},
+  options: { repoFullName?: string; confirmedMinerLogins?: ReadonlySet<string> } = {},
 ): Omit<GatePrecisionReport, "repoFullName" | "generatedAt" | "windowDays"> {
   const repoFullName = options.repoFullName;
+  const trackCohorts = Boolean(options.confirmedMinerLogins);
+  const cohortBlocked: Record<ContributorCohort, number> = { miner: 0, human: 0 };
+  const cohortMerged: Record<ContributorCohort, number> = { miner: 0, human: 0 };
   // Index PRs by number for an O(1) terminal-outcome lookup, scoped to the repo when one is given.
   const prByNumber = new Map<number, PullRequestRecord>();
   for (const pr of pullRequests) {
@@ -84,6 +106,13 @@ export function buildGatePrecisionReport(
     const merged = pr ? terminalOutcome(pr) === "merged" : false;
     overallBlocked += 1;
     if (merged) overallMerged += 1;
+    if (trackCohorts && options.confirmedMinerLogins && pr) {
+      const cohort = classifyPullRequestCohort(pr, options.confirmedMinerLogins);
+      if (cohort) {
+        cohortBlocked[cohort] += 1;
+        if (merged) cohortMerged[cohort] += 1;
+      }
+    }
     for (const code of outcome.blockerCodes) {
       const entry = perType.get(code) ?? { blocked: 0, blockedThenMerged: 0, overridden: 0 };
       entry.blocked += 1;
@@ -104,12 +133,27 @@ export function buildGatePrecisionReport(
     }))
     .sort((a, b) => b.blocked - a.blocked || a.gateType.localeCompare(b.gateType));
 
+  const byCohort = trackCohorts
+    ? (["miner", "human"] as const).reduce<Partial<Record<ContributorCohort, GatePrecisionCohortOverall>>>((acc, cohort) => {
+        const blocked = cohortBlocked[cohort];
+        const blockedThenMerged = cohortMerged[cohort];
+        if (blocked === 0 && blockedThenMerged === 0) return acc;
+        acc[cohort] = {
+          blocked,
+          blockedThenMerged,
+          falsePositiveRate: blocked >= MIN_SAMPLE ? round(blockedThenMerged / blocked) : null,
+        };
+        return acc;
+      }, {})
+    : undefined;
+
   return {
     perGateType,
     overall: {
       blocked: overallBlocked,
       blockedThenMerged: overallMerged,
       falsePositiveRate: overallBlocked >= MIN_SAMPLE ? round(overallMerged / overallBlocked) : null,
+      ...(byCohort && Object.keys(byCohort).length > 0 ? { byCohort } : {}),
     },
     signals: buildGatePrecisionSignals(perGateType, overallBlocked, overallMerged),
   };
@@ -139,6 +183,7 @@ export async function loadGatePrecisionReport(env: Env, repoFullName: string, op
     listPullRequests(env, repoFullName),
     listGateOutcomes(env, { repoFullName, ...(options.windowDays !== undefined ? { windowDays: options.windowDays } : {}) }),
   ]);
-  const report = buildGatePrecisionReport(outcomes, pullRequests, { repoFullName });
+  const confirmedMinerLogins = await loadConfirmedMinerLoginsForPullRequests(env, pullRequests);
+  const report = buildGatePrecisionReport(outcomes, pullRequests, { repoFullName, confirmedMinerLogins });
   return { repoFullName, generatedAt: nowIso(), windowDays: options.windowDays ?? null, ...report };
 }
