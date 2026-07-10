@@ -33,4 +33,25 @@ describe("buildCohortRecapSection (#4521)", () => {
     expect(section?.lines[0]).toContain("Miner-originated");
     expect(section?.lines[0]).toContain("gate false-positive rate n/a");
   });
+
+  it("renders human-only cohort lines when miner data is absent", () => {
+    const section = buildCohortRecapSection({
+      windowDays: 7,
+      cohorts: {
+        human: { reviewed: 5, merged: 3, closed: 2, blocked: 4, gateFalsePositives: 1, gateFalsePositiveRate: 0.25 },
+      },
+    });
+    expect(section?.lines).toHaveLength(1);
+    expect(section?.lines[0]).toContain("Human-originated");
+    expect(section?.lines[0]).not.toContain("Miner-originated");
+  });
+
+  it("returns null when cohort keys exist but every slice is empty", () => {
+    expect(
+      buildCohortRecapSection({
+        windowDays: 7,
+        cohorts: { miner: undefined, human: undefined },
+      }),
+    ).toBeNull();
+  });
 });

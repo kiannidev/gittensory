@@ -32,4 +32,20 @@ describe("contributor-cohort (#4521)", () => {
     expect([...logins]).toEqual(["miner-one"]);
     spy.mockRestore();
   });
+
+  it("skips PRs with no author login when resolving confirmed miners", async () => {
+    const env = createTestEnv();
+    const pullRequests: PullRequestRecord[] = [
+      { repoFullName: "owner/repo", number: 1, title: "no author", state: "closed", labels: [], linkedIssues: [] },
+      { repoFullName: "owner/repo", number: 2, title: "has author", state: "closed", authorLogin: "miner-one", labels: [], linkedIssues: [] },
+    ];
+    const spy = vi.spyOn(repositories, "getFreshOfficialMinerDetection").mockResolvedValue({
+      status: "confirmed",
+      snapshot: { login: "miner-one", githubId: "1", priorPullRequests: 1, priorIssues: 0 } as never,
+    });
+    const logins = await loadConfirmedMinerLoginsForPullRequests(env, pullRequests);
+    expect([...logins]).toEqual(["miner-one"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
 });

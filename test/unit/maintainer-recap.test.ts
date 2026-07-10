@@ -145,6 +145,91 @@ describe("buildMaintainerRecap (#2239)", () => {
     expect(report.repos[0]?.repoFullName).not.toContain("/Users/secret");
   });
 
+  it("omits cohorts when upstream reports carry no miner or human slices", () => {
+    const report = buildMaintainerRecap({ generatedAt: GEN, repos: [repoInput("owner/repo-a")] });
+    expect(report.cohorts).toBeUndefined();
+    expect(report.repos[0]?.cohorts).toBeUndefined();
+  });
+
+  it("folds gate-only cohort slices when slop cohort data is absent", () => {
+    const report = buildMaintainerRecap({
+      generatedAt: GEN,
+      repos: [
+        {
+          gatePrecision: {
+            repoFullName: "owner/repo-a",
+            generatedAt: GEN,
+            windowDays: 7,
+            perGateType: [],
+            overall: {
+              blocked: 5,
+              blockedThenMerged: 1,
+              falsePositiveRate: null,
+              byCohort: { miner: { blocked: 5, blockedThenMerged: 1, falsePositiveRate: 0.2 } },
+            },
+            signals: [],
+          },
+          calibration: {
+            repoFullName: "owner/repo-a",
+            generatedAt: GEN,
+            windowDays: 7,
+            slop: { totalResolved: 0, bands: [], overallMergeRate: null, discriminates: null },
+            recommendations: { total: 0, positive: 0, negative: 0, pending: 0, positiveRate: null },
+            signals: [],
+          },
+        },
+      ],
+    });
+    expect(report.repos[0]?.cohorts?.miner).toMatchObject({
+      reviewed: 0,
+      merged: 0,
+      closed: 0,
+      blocked: 5,
+      gateFalsePositives: 1,
+      gateFalsePositiveRate: 0.2,
+    });
+  });
+
+  it("folds slop-only cohort slices and nulls the gate rate when nothing was blocked", () => {
+    const report = buildMaintainerRecap({
+      generatedAt: GEN,
+      repos: [
+        {
+          gatePrecision: {
+            repoFullName: "owner/repo-a",
+            generatedAt: GEN,
+            windowDays: 7,
+            perGateType: [],
+            overall: { blocked: 0, blockedThenMerged: 0, falsePositiveRate: null },
+            signals: [],
+          },
+          calibration: {
+            repoFullName: "owner/repo-a",
+            generatedAt: GEN,
+            windowDays: 7,
+            slop: {
+              totalResolved: 3,
+              bands: [],
+              overallMergeRate: null,
+              discriminates: null,
+              byCohort: { human: { totalResolved: 3, merged: 2, closed: 1 } },
+            },
+            recommendations: { total: 0, positive: 0, negative: 0, pending: 0, positiveRate: null },
+            signals: [],
+          },
+        },
+      ],
+    });
+    expect(report.repos[0]?.cohorts?.human).toMatchObject({
+      reviewed: 3,
+      merged: 2,
+      closed: 1,
+      blocked: 0,
+      gateFalsePositives: 0,
+      gateFalsePositiveRate: null,
+    });
+  });
+
   it("folds miner-vs-human cohort slices when upstream reports carry them", () => {
     const report = buildMaintainerRecap({
       generatedAt: GEN,

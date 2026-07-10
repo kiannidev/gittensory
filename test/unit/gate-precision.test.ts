@@ -87,6 +87,12 @@ describe("buildGatePrecisionReport", () => {
     expect(JSON.stringify(report)).not.toMatch(/login|actor|reward|payout|trust|wallet|hotkey|credibility/i);
   });
 
+  it("skips cohort tracking when a blocked PR has no author login", () => {
+    const miners = new Set(["miner-author"]);
+    const report = buildGatePrecisionReport([block(1, ["x"])], [pr(1, "merged")], { confirmedMinerLogins: miners });
+    expect(report.overall.byCohort).toBeUndefined();
+  });
+
   it("partitions overall precision by miner-vs-human cohort when confirmed miner logins are provided", () => {
     const miners = new Set(["miner-author"]);
     const blocks = [block(1, ["x"]), block(2, ["x"]), block(3, ["x"]), block(4, ["x"]), block(5, ["x"]), block(6, ["x"])];
@@ -165,12 +171,22 @@ describe("loadGatePrecisionReport (env loader)", () => {
 
     const report = await loadGatePrecisionReport(env, "owner/repo");
     expect(report.repoFullName).toBe("owner/repo");
+    expect(report.windowDays).toBeNull();
     const byType = Object.fromEntries(report.perGateType.map((t) => [t.gateType, t]));
     expect(byType.slop_risk).toMatchObject({ blocked: 2, blockedThenMerged: 1, overridden: 1 }); // PR1 (merged+overridden) + PR2 (closed)
     expect(byType.missing_linked_issue).toMatchObject({ blocked: 1, blockedThenMerged: 1, overridden: 1 });
     expect(report.overall).toMatchObject({ blocked: 2, blockedThenMerged: 1 });
     expect(report.signals.length).toBeGreaterThan(0);
     expect(JSON.stringify(report)).not.toMatch(/reward|payout|trust score|wallet|hotkey|login|actor/i);
+  });
+
+  it("honors windowDays when loading gate outcomes for precision", async () => {
+    const env = createTestEnv();
+    await recordGateBlockOutcome(env, { repoFullName: "owner/repo", pullNumber: 1, headSha: "sha1", blockerCodes: ["slop_risk"] });
+    await upsertPullRequestFromGitHub(env, "owner/repo", { number: 1, title: "closed", state: "closed", user: { login: "alice" } });
+    const report = await loadGatePrecisionReport(env, "owner/repo", { windowDays: 7 });
+    expect(report.windowDays).toBe(7);
+    expect(report.overall.blocked).toBe(1);
   });
 
   it("preserves overridden across a SAME-head re-block (a re-block on the same commit keeps the override)", async () => {

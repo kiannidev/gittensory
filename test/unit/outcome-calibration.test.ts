@@ -55,6 +55,25 @@ describe("buildSlopOutcomeCalibration", () => {
     expect(result.totalResolved).toBe(4);
   });
 
+  it("skips PRs whose slop band is outside the calibration order", () => {
+    const bogusBand = "bogus" as SlopBand;
+    const result = buildSlopOutcomeCalibration([
+      { repoFullName: "owner/repo", number: 1, title: "bogus band", state: "closed", mergedAt: "2026-06-01T00:00:00.000Z", labels: [], linkedIssues: [], slopRisk: 50, slopBand: bogusBand },
+      ...band("clean", 1, 1, 0),
+    ]);
+    expect(result.totalResolved).toBe(1);
+  });
+
+  it("skips cohort tracking when a resolved PR has no author login", () => {
+    const miners = new Set(["miner-author"]);
+    const result = buildSlopOutcomeCalibration(
+      [pr("clean", true, 1), pr("clean", false, 2, "human-author")],
+      { confirmedMinerLogins: miners },
+    );
+    expect(result.byCohort?.human).toMatchObject({ totalResolved: 1, merged: 0, closed: 1 });
+    expect(result.byCohort?.miner).toBeUndefined();
+  });
+
   it("partitions resolved outcomes by miner-vs-human cohort when confirmed miner logins are provided", () => {
     const miners = new Set(["miner-author"]);
     const result = buildSlopOutcomeCalibration(
